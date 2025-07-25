@@ -6,10 +6,7 @@
 3. [Podstawowe tryby przetwarzania](#podstawowe-tryby-przetwarzania)
 4. [Zadania systemu operacyjnego](#zadania-systemu-operacyjnego)
 5. [Zasoby systemu komputerowego](#zasoby-systemu-komputerowego)
-6. [Podsystemy systemu operacyjnego](#podsystemy-systemu-operacyjnego)
-7. [Funkcje systemowe i API](#funkcje-systemowe-i-api)
-8. [Przerwania i pułapki](#przerwania-i-pułapki)
-9. [Ochrona sprzętowa](#ochrona-sprzętowa)
+6. [Cykl instrukcji CPU](#cykl-instrukcji-cpu-cpu-instruction-cycle)
 
 ---
 
@@ -130,6 +127,137 @@ System operacyjny zarządza wszystkimi zasobami sprzętowymi komputera – przed
   - synchronizować operacje,
   - kolejkować dostęp,
   - chronić przed konfliktem danych.
+
+## Podstawowe tryby przetwarzania <a id="podstawowe-tryby-przetwarzania"></a>
+
+Użytkownik może zlecić różne zadania, jednak to OS decyduje w jaki sposób je wykonać (w jakiej kolejności, czy pozwalać na bieżące modyfikacje ze strony użytkownika itd.)
+
+Istnieją 3 główne tryby przetwarzania:
+- **off-line** (batch) - przetwarzanie wsadowe
+- **on-line** (interactive)
+- **real time** (czas rzeczywisty)
+
+Tryb pracy determinuje: 
+- czy użytkownik może reagować w trakcie działania programu,
+- jak ważne jest dokładne trzymanie się limitów czasowych,
+- jak system alokuje zasoby i przełącza zadania.
+
+### 1. Tryb wsadowy (*batch*, *off-line*)
+W trybie wsadowym użytkownik nie wykonuje programu ręcznie ani nie wchodzi z nim w interakcję.  
+Zamiast tego **zadanie jest wrzucane do kolejki zadań (job queue)**, a system operacyjny **sam decyduje, kiedy i jak je wykonać**. Kolejka ta może być priorytetowa.
+
+**Cechy charakterystyczne:**
+- **brak interakcji z użytkownikiem** podczas działania zadania,
+- nieprzewidywalny czas rozpoczęcia (zależy od dostępnych zasobów i kolejki, jeśli w kolejce znajduje się zbyt dużo zadań i/lub prioprytet wrzuconego zadania jest niski, to możliwe jest oczekiwanie na odpowiedź w ciągu kilku minut/godzin),
+- pełne wykorzystanie zasobów – zadanie może zająć cały CPU i RAM,
+- zadanie kończy się samo i **zwraca gotowy wynik** (np. log, raport, plik wyjściowy), nie można otrzymać albo podejrzeć wynik dotychczasowy.
+
+**Zalety:**
+- proste planowanie,
+- wysoka efektywność (można optymalnie przydzielać zasoby).
+
+**Wady:**
+- brak elastyczności i reaktywności,
+- nie nadaje się do aplikacji interaktywnych ani czasu rzeczywistego.
+
+**Przykład:**   załóżmy, że co noc o 2:00 system automatycznie robi kopię zapasową plików:
+```bash
+tar -czf backup_$(date +%F).tar.gz /home/maksim
+```
+Nie siedzimy przy komputerze, nie obserwujemy działania, nie możemy wpłynąć na wykonanie zadania w jego ciągu, tylko rano widzimy, że powstał plik z kopią - czyli widzimy wynik gotowy.
+
+### 2. Tryb interaktywny (*on-line*, *time-sharing*)
+
+W trybie interaktywnym wiele zadań użytkownika działa jednocześnie. System operacyjny dzieli czas procesora na małe kawałki (tzw. *time slice*, np. 20 ms) i **cyklicznie przełącza zadania**.
+
+**Cechy charakterystyczne:**
+- użytkownik **może wchodzić w interakcję z systemem w czasie rzeczywistym**,
+- OS stosuje **preempcję** – może przerwać jedno zadanie i dać czas CPU innemu,
+- każdy proces dostaje „kwant czasu” do wykorzystania,
+- dochodzi do **przełączeń kontekstu (context switch)** między zadaniami - OS wstrzymuje zadanie A, zapisuje jego stan (kontekst), ładuje zadanie B w tym stanie, w którym zostało ono wstrzymane i wykonuje zadanie B do kolejnego przełączenia kontekstu,
+- działa w tzw. trybie wielozadaniowym (*multitasking*).
+
+**Zalety:**
+- płynna praca wielu aplikacji równocześnie,
+- wygodność dla użytkownika - wydaje się, że system wykonuje wszystkie zadania równolegle.
+
+**Wady:**
+- złożoność planowania,
+- potencjalne koszty przełączeń kontekstu,
+- mniej efektywne niż wsad dla zadań długich i wymagających dużej ilości zasobów.
+
+**Przykład:**
+mamy otwarte trzy aplikacje:
+- YouTube w przeglądarce (bieżące wideo),
+- edytor tekstu (`notepad.exe`),
+- terminal (`bash`) wykonujący `ping`.
+
+System operacyjny **przełącza je co kilkadziesiąt milisekund**, dając wrażenie, że wszystkie działają jednocześnie.  
+Kiedy przeglądarka czeka na dane z sieci – CPU przeskakuje do terminala.  
+Kiedy wpisujesz coś w edytorze – jego proces dostaje kolejne ułamki czasu.
+
+> Typowe zastosowania: systemy biurkowe (Linux, Windows, macOS), serwery z wieloma użytkownikami (SSH), terminale zdalne.
+
+### 3. Tryb czasu rzeczywistego (*real-time*)
+
+W trybie czasu rzeczywistego system operacyjny **musi zareagować na zdarzenie zewnętrzne w określonym czasie**.  
+Ten czas to tzw. **górna granica czasu reakcji** (*reaction time bound*), której nie wolno przekroczyć.
+
+**Cechy charakterystyczne:**
+- OS reaguje na zdarzenia w czasie **deterministycznym** (np. do 5 ms),
+- zadania mają **priorytety czasowe** i często działają w środowisku z gwarancją zasobów,
+- brak możliwości czekania w kolejce — reakcja musi być natychmiastowa,
+- tryb używany w systemach **krytycznych**, gdzie opóźnienie może mieć straszne skutki (np. dziedzina transportu).
+
+Rodzaje systemów RT:
+| Typ | Opis |
+|-----|------|
+| **Hard RT** | reakcja **zawsze** musi nastąpić przed upływem limitu. Opóźnienie = awaria. |
+| **Soft RT** | opóźnienie jest tolerowane, ale wpływa na jakość działania (np. dźwięk, animacja). |
+
+---
+
+**Przykład:**
+wyobraźmy sobie, że drzwi do sejfu zostały otwarte nieautoryzowanie.  
+System RT ma **dokładnie 20 ms**, aby uruchomić alarm (czyli wysłać sygnał I/O).  
+Jeśli spóźni się choćby o 1 ms, alarm nie zostanie uznany za ważny. Albo np. system ma dokładnie 100 ms, aby silnik samochodu zareagował na sygnał. 
+
+Tego typu system:
+- ma zarezerwowane zasoby tylko dla siebie,
+- działa w sposób przewidywalny,
+- jest stosowany w przemyśle, transporcie, medycynie, lotnictwie.
+
+> Typowe zastosowania: systemy ABS w samochodzie, robotyka przemysłowa, sterowanie sygnalizacją świetlną, monitorowanie pacjenta w szpitalu.
+
+## Cykl instrukcji CPU (CPU instruction cycle) <a id="cykl-instrukcji-cpu-cpu-instruction-cycle"></a>
+
+Procesor wykonuje instrukcje w prostym cyklu:
+
+1. **Fetch** – pobierz instrukcję z pamięci (na podstawie IP – *Instruction Pointer*).
+2. **Decode** – zdekoduj ją (rozpoznaj, co oznaczają bajty).
+3. **Execute** – wykonaj ją (zmień rejestry, zapisz wynik, wykonaj operację).
+
+### 🔎 Przykład (x86):
+```assembly
+b8 04 00 00 00   ; instrukcja: MOV EAX, 4
+```
+
+- `b8` oznacza: załaduj wartość do rejestru `EAX`
+- `04 00 00 00` to liczba `4` w postaci 4 bajtów
+
+CPU:
+- pobiera instrukcję z RAM (`fetch`)
+- rozpoznaje bajty (`decode`)
+- wykonuje (wpisuje 4 do `EAX`) (`execute`)
+- zwiększa `IP`, by przejść do kolejnej instrukcji
+
+> Cykl `fetch → decode → execute` jest zapisany fizycznie w sprzęcie CPU. OS i programy tylko dostarczają instrukcje – CPU działa samodzielnie.
+
+
+
+
+
+
 
 
 
