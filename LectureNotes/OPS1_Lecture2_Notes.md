@@ -329,7 +329,7 @@ int newfd = dup2(int oldfd, int desiredfd);
 
 Oba deskryptory współdzielą ten sam **offset** i prawa dostępu.
 
-### Przykład z `dup()`
+### Przykład z `dup()` xdd
 ```c
 int fd = open("plik.txt", O_RDONLY);
 int fd2 = dup(fd);   // fd2 wskazuje na to samo co fd
@@ -349,6 +349,166 @@ printf("Hello!\n"); // zapisze się do pliku, nie na ekran
 - Współdzielenie deskryptorów między procesami po `fork()`.
 
 ---
+
+## Operacje na katalogach (`opendir`, `readdir`, `closedir`)
+
+Katalog w systemie plików nie jest zwykłym plikiem z danymi, tylko **strukturą zawierającą listę wpisów** (nazwa pliku + numer inode).  
+Do ich odczytu POSIX udostępnia specjalne API z `<dirent.h>`.
+
+### Podstawowe funkcje
+- `DIR *opendir(const char *dirname);`  
+  otwiera katalog i zwraca strumień katalogu (`DIR*`).
+- `struct dirent *readdir(DIR *dirp);`  
+  zwraca kolejną pozycję z katalogu (struktura zawiera m.in. `d_name` = nazwa pliku).  
+  Zwraca `NULL`, gdy nie ma więcej wpisów.
+- `int closedir(DIR *dirp);`  
+  zamyka otwarty katalog i zwalnia zasoby.
+
+### Struktura `dirent`
+Najważniejsze pola:
+- `d_name` – nazwa pliku/katalogu
+- `d_ino` – numer inode'a
+- `d_type` – typ wpisu (`DT_REG` = plik, `DT_DIR` = katalog, `DT_LNK` = symlink itd.)  
+  *(może być `DT_UNKNOWN` – wtedy należy użyć `stat()`/`lstat()` aby sprawdzić typ pliku).*
+
+### Przykład: 
+```c
+#define _DEFAULT_SOURCE // do użycia makr (DT_REG, DT_DIR itd.)
+
+#include <stdio.h>
+#include <sys/io.h>
+#include <dirent.h>
+#include <stdlib.h>
+#include <string.h>
+#include <fcntl.h>
+
+int main()
+{
+    DIR* curdir = opendir("."); // bieżący katalog
+    if (curdir == NULL)
+    {
+        perror("this directory doesn't exist");
+        return EXIT_FAILURE;
+    }
+
+    struct dirent* direntry;
+
+    while (1)
+    {
+        direntry = readdir(curdir);
+        if (direntry == NULL)
+            break;
+
+        if (!strcmp(direntry->d_name, ".") || !strcmp(direntry->d_name, ".."))
+            continue;
+        
+        if (direntry->d_type == DT_DIR)
+            printf("[DIR] %s\n", direntry->d_name);
+        else if (direntry->d_type == DT_REG)
+            printf("[FILE] %s\n", direntry->d_name);
+        else 
+            printf("[OTHER] %s\n", direntry->d_name);
+        
+    }
+
+    closedir(curdir);
+    return EXIT_SUCCESS;
+}
+```
+
+### Kilka dodatkowych funkcji
+- `void rewinddir(DIR* curdir)` - ustawia pozycję strumienia katalogu z powrotem na początek (zamiast zamykać i otwierać katalog od nowa)
+- `long telldir(DIR* curdir)` - zwraca bieżącą pozycję w strumieniu katalogu 
+- `void seekdir(DIR* curdir, long curpos)` - ustawia pozycję strumienia na konkretną pozycję
+---
+
+## Root i CWD (Current Working Directory)
+Każdy proces w systemie ma 2 atrybuty związane z katalogami:
+- **root ('/)** - katalog główny widoczny dla procesu. Domyślnie jest to ('/), jednak można go zmienić przez `int chroot(const char* path)` (będzie to wymagało 
+uprawnień administratora)
+- **CWD** (Bieżący katalog roboczy). Z niego startuje interpretacja ścieżek względnych. Można go zmienić przez `int chdir(const char* path)` i 
+sprawdzić przez `char* getcwd(char* buf, size_t size)`
+
+## Symboliczne linki (symlinki)
+
+**Symlink** (symboliczny link) to specjalny plik, który zawiera **ścieżkę do innego pliku lub katalogu**.  
+Działa jak „skrót” – przy otwieraniu system podąża za zapisaną ścieżką.
+
+### Cechy:
+- wskazuje na **ścieżkę**, a nie na inoda,
+- może wskazywać dowolny plik lub katalog, nawet na innym systemie plików,
+- jeśli cel zostanie usunięty, symlink staje się **broken** (nie działa).
+
+### Przykład:
+```bash
+ln -s a.txt b.txt   # utworzenie symlinka
+cat b.txt           # czyta zawartość pliku a.txt
+
+rm a.txt            # usunięcie pliku a.txt
+cat b.txt           # wynik: No such file or directory
+```
+---
+## Standard C Streams 
+Standard C streams to *wyższy* poziom API wejścia/wyjścia w C. 
+Owijają one deskryptor pliku (POSIX `int fd`) w strukturę `FILE*` i dodają **buforowanie**,
+**formatowanie tekstu**, **wieloplatformowość** i **bezpieczne domyślne** zachowania. 
+POSIX-owe `open/read/write/close` to *niższy* poziom: daje pełną kontrolę, flagi, tryby nieblokujące, ale wymaga ręcznego 
+zarządzania buforami i formatowaniem.
+
+### Struktura `FILE`
+Struktura zarządzana przez bibliotekę C. Zawiera w sobie:
+- **`int fd`** - zwykły POSIXowy deskryptor
+- **bufor** w pamięci użytkownika (dla lepszej wydajności)
+- **wskaźniki pozycji w buforze**, **flagi błędów**, **znacznik EOF**, **mutex** do synchronizacji
+
+### Funkcja `fopen()`
+```c
+FILE* fopen(const char* pathname, const char* mode);
+```
+- fopen() nie jest syscallem
+- funkcja zwraca wskaźnik do struktury `FILE`
+
+#### Dostępne mody
+- `'r'` - (read), jeśli plik istnieje, to otwiera go, jeśli nie istnieje - błąd, początkowa pozycja - początek pliku, wolno czytać
+- `'w'` - (write), jeśli plik istnieje, ucina go do 0 długości, jeśli nie istnieje, to tworzy go, początkowa pozycja - początek pliku, wolno pisać
+- `'a'` - (read+write), otwiera/tworzy od nowa plik, początkowa pozycja - koniec pliku, wolno czytać i pisać na końcu
+- dodanie `'+'` - umożliwienie zarówno czytania, jak i pisania
+
+### Funkcje strumienowe I/O
+- `int fgetc(FILE* f)` - czyta jeden znak ze strumienia (int, bo może zwrócić też EOF)
+- `int getchar(void)` - czyta znak z stdin
+- `int fputc(char c, FILE* f)` - zapisuje jeden znak do strumienia
+- `int putchar(char c)` - znapisuje znak na stdout
+- `char* fgets(char* buf, int buflen, FILE* f)` - czyta co najwyżej **buflen-1** znaków do bufora (wraz z '\0'). Może się zatrzymać wcześniej (na końcu pliku lub na znaku '\n')
+- `char* fgets(const char* s, FILE* f)` - wypisuje cały łańcuch (bez '\0')
+- `int fprintf(FILE* f, const char* template, ...)` - zapis formatowany (jak printf(), ale do podanego strumienia)
+- `int fscanf(FILE* f, const char* template, ...)` - odczyt formatowany (jak scanf(), ale z podanego strumienia)
+- `size_t fread(void* ptr, size_t size, size_t nitems, FILE* f)` - czyta *nitems* elementów po *size* bajtów każdy i odkłada w ptr
+- `size_t fwrite(void* ptr, size_t size, size_t nitems, FILE* f)` - zapisuje blok danych w ten sam sposób 
+
+### Buforowanie
+Domyślnie struktura `FILE` zawiera w sobie bufor w pamięci użytkownika. Wszystkie wpisy (przez funkcje fputc, fprintf, fwrite, ...) nie trafiają
+bezpośrednio do jądra. Zmiany trafiają najpierw do bufora. Dopiero kiedy bufor zostanie całkiem zapełniony, albo zrobimy `fflush(FILE* f)`, albo 
+`fclose(FILE* f)` dane trafią do jądra, a już potem - do dysku. 
+
+Istnieją 3 tryby buforowania:
+- `_IONBF` - (non-buffered) wszystkie operacje natychmiast są tłumaczone na syscalle (stderr)
+- `_IOLBF` - (line-buffered) flush, gdy pojawia się znak `\n` (terminal)
+- `_IOFBF` - (full-buffered) flush dopiero gdy bufor jest pełny, albo ręcznie (zwykły plik)
+
+### Funkcje stanu strumienia
+- `int feof(FILE* f)` - zwraca niezerową wartość, jeśli na strumieniu został ustawiony znacznik *EOF*. (Ważne: *EOF* ustawia się dopiero po nieudanej próbie czytania za końcem pliku)
+- `int ferror(FILE* f)` - zwraca niezerową wartość, jeśli wystąpił błąd I/O podczas operacji na strumieniu (uszkodzony nośnik, problemy z kodowaniem)
+- `void clearerr(FILE* f)` - czyści oba znaczniki: *EOF* i *ERROR*
+
+Nawet jeśli dotarliśmy do końca pliku, *EOF* został ustawiony, ale potem inny proces dopisał dane do pliku, to bieżący strumień tego nie zauważy, a
+więc należy koniecznie użyć `clearerr(FILE* f)` w przypadku dojścia do *EOF*.
+
+
+
+
+
+
 
 
 
