@@ -75,20 +75,38 @@ void analize_file(char* name)
     buf[nBytes] = '\0';
 
     close(fd);
+
+    pid_t children_pids[2] = {0};
     
-    char* first_child = strtok(buf, "\n");
-    char* second_child = strtok(NULL, "\n");
-
-    if (strcmp(first_child, "-") != 0)
+    char* child_name = strtok(buf, "\n");
+    int child_count = 0;
+    while (child_name)
     {
-        printf("%s inspecting %s\n", name, first_child);
-    }
-    if (strcmp(second_child, "-") != 0)
-    {
-        printf("%s inspecting %s\n", name, second_child);
+        if (strcmp(child_name, "-") == 0)
+        {
+            child_name = strtok(NULL, "\n");
+            continue;
+        }
+
+        printf("%s is inspecting a subordinate named %s\n", name, child_name);
+        pid_t child_pid = fork();
+        switch (child_pid)
+        {
+            case -1:
+                ERR("fork");
+            case 0:
+                analize_file(child_name);
+                exit(EXIT_SUCCESS);
+            default:
+                children_pids[child_count++] = child_pid;
+                break;
+        }
+        
+        child_name = strtok(NULL, "\n");
     }
 
-    printf("%s has inspected all subordinates!\n", name);
+    while (wait(NULL) > 0) {}
+    printf("%s is leaving an office!\n", name);
     return;
 }
 
