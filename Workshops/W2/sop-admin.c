@@ -60,12 +60,48 @@ void user1_handler(int sig) { sig_usr1 = 1; }
 void user2_handler(int sig) { sig_usr2 = 1; }
 void int_handler(int sig) { sig_int = 1; }
 
+void analize_file(char* name)
+{
+    printf("My name is %s and my PID is %d\n", name, getpid());
+    
+    int fd = open(name, O_RDONLY);
+    if (fd < 0)
+        ERR("open");
+    
+    char buf[FILE_MAX_SIZE + 1] = {0};
+    ssize_t nBytes = bulk_read(fd, buf, FILE_MAX_SIZE);
+    if (nBytes < 0)
+        ERR("bulk_read");
+    buf[nBytes] = '\0';
+
+    close(fd);
+    
+    char* first_child = strtok(buf, "\n");
+    char* second_child = strtok(NULL, "\n");
+
+    if (strcmp(first_child, "-") != 0)
+    {
+        printf("%s inspecting %s\n", name, first_child);
+    }
+    if (strcmp(second_child, "-") != 0)
+    {
+        printf("%s inspecting %s\n", name, second_child);
+    }
+
+    printf("%s has inspected all subordinates!\n", name);
+    return;
+}
+
 int main(int argc, char* argv[])
 {
     if (argc != 3)
         usage(argc, argv);
 
     // killall sop-admin -SIGUSR1
+    if (chdir(argv[1]))
+        ERR("chdir");
+    analize_file(argv[2]);
+    return EXIT_SUCCESS;
 
     // Initializing 2 sigsets: for current signal mask and for the new one.
     sigset_t mask, oldMask;
