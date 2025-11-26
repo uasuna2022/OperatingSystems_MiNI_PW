@@ -60,7 +60,7 @@ void user1_handler(int sig) { sig_usr1 = 1; }
 void user2_handler(int sig) { sig_usr2 = 1; }
 void int_handler(int sig) { sig_int = 1; }
 
-void analize_file(char* name)
+void analize_file(char* name, sigset_t* oldMask, int is_admin)
 {
     printf("My name is %s and my PID is %d\n", name, getpid());
     
@@ -95,7 +95,7 @@ void analize_file(char* name)
             case -1:
                 ERR("fork");
             case 0:
-                analize_file(child_name);
+                analize_file(child_name, oldMask, 0);
                 exit(EXIT_SUCCESS);
             default:
                 children_pids[child_count++] = child_pid;
@@ -104,6 +104,38 @@ void analize_file(char* name)
         
         child_name = strtok(NULL, "\n");
     }
+    
+    printf("%s has inspected all subordinates\n", name);
+    printf("%s is waiting for documents...\n", name);
+    srand(getpid());
+    while (sigsuspend(&oldMask))
+    {
+        if (sig_usr2 == 1)
+        {
+            sig_usr2 = 0;
+            printf("%s received SIGUSR2\n", name);
+            switch (rand() % 3)
+            {
+                case 0:
+                case 1:
+                    if (is_admin)
+                    {
+                        printf("%s received a document. Ignoring. XDDD\n", name);
+                    }
+                    else 
+                    {
+                        printf("%s received a document. Passing it to the superintendent...\n", name);
+                        kill(getppid(), 12);
+                    }
+                    break;
+                case 2:
+                    printf("%s received a document. Sending to the archive XD\n", name);
+                default:
+                    break;
+            }
+        }
+    }
+
 
     while (wait(NULL) > 0) {}
     printf("%s is leaving an office!\n", name);
@@ -114,12 +146,6 @@ int main(int argc, char* argv[])
 {
     if (argc != 3)
         usage(argc, argv);
-
-    // killall sop-admin -SIGUSR1
-    if (chdir(argv[1]))
-        ERR("chdir");
-    analize_file(argv[2]);
-    return EXIT_SUCCESS;
 
     // Initializing 2 sigsets: for current signal mask and for the new one.
     sigset_t mask, oldMask;
@@ -141,20 +167,23 @@ int main(int argc, char* argv[])
     sethandler(int_handler, SIGINT);
 
     printf("Waiting for SIGUSR1...\n");
+    printf("PID: %d\n", getpid());
 
     // sig_usr1 will be false until we handle a signal SIGUSR1
     // sigsuspend() function does the following:
     // - changes the process mask to oldMask for a moment (in our logic all the signals are becoming unblocked);
     // - process starts to "sleep" (doesn't use the CPU) and waits for the unblocked signal;
     // - when signal is handled, the original process mask is being returned, function finishes its job
-    while (!sig_usr1 && sigsuspend(&oldMask))
-    {
-        // waiting for the signal
-        printf("PID: %d\n", getpid());
-        printf("Waiting for the signal...\n");
-        printf("SIGUSR1 - %d\nSIGUSR2 - %d\nSIGINT - %d\n", sig_usr1, sig_usr2, sig_int);
-    }
+    while (!sig_usr1 && sigsuspend(&oldMask)) {/* waiting for the signal */}
 
-    printf("SIGUSR1 received, process finished!\n");
+    printf("SIGUSR1 received!\n");
+    sig_usr1 = 0;
+    sig_usr2 = 0;
+    sig_int = 0;
+
+    if (chdir(argv[1]) < 0)
+        ERR("chdir");
+
+    analize_file(argv[2], &oldMask, 1);
     return EXIT_SUCCESS;
 }
