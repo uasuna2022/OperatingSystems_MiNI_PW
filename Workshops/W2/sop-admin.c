@@ -134,9 +134,20 @@ void analize_file(char* name, sigset_t* oldMask, int is_admin)
                     break;
             }
         }
+
+        if (sig_int == 1)
+        {
+            sig_int = 0;
+            printf("%s ending the day.\n", name);
+            for (int i = 0; i < child_count; i++)
+            {
+                kill(children_pids[i], SIGINT);
+            }
+            break;
+        }
     }
 
-
+    printf("%s is waiting for all the subordinates to finish...\n", name);
     while (wait(NULL) > 0) {}
     printf("%s is leaving an office!\n", name);
     return;
