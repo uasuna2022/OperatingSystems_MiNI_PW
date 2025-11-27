@@ -99,11 +99,25 @@ char get_new_symbol(char old_symbol)
     return new_symbol;
 }
 
+void safe_nanosleep(long nanoseconds)
+{
+    struct timespec req, rem;
+    req.tv_sec = 0;
+    req.tv_nsec = nanoseconds;
+    while (nanosleep(&req, &req) == -1)
+    {
+        if (errno == EINTR)
+            req = rem;
+        else ERR("nanosleep");
+    }
+}
+
 void child_write(int child_number, ssize_t block_size, char* buf, char* filename)
 {
     for (int i = 0; i < block_size; i++)
     {
         buf[i] = get_new_symbol(buf[i]);
+        safe_nanosleep(100000000);
     }
 
     char* token = strtok(filename, ".");
