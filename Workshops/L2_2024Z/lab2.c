@@ -13,7 +13,8 @@
 
 ssize_t bulk_read(int fd, char* buf, size_t count) 
 { 
-    ssize_t c; ssize_t len = 0; 
+    ssize_t c; 
+    ssize_t len = 0; 
     do 
     { 
         c = TEMP_FAILURE_RETRY(read(fd, buf, count)); 
@@ -65,24 +66,18 @@ void sethandler(void (*f)(int), int sigNo)
         ERR("sigaction"); 
 }
 
-void create_children(int k)
+ssize_t child_work(int fd, int child_number, ssize_t block_size, char* buf)
 {
-    for (int i = 0; i < k; i++)
-    {
-        pid_t pid = fork();
-        switch(pid)
-        {
-            case -1:
-                ERR("fork");
-            case 0:
-                printf("[%d] Hi, I'm a child, my pid is %d\n", getpid(), getpid());
-                exit(EXIT_SUCCESS);
-            default:
-                printf("[%d] Hi, I'm a main parent process, my pid is %d\n", getpid(), getpid());
-                break;
-        }
-    }
+    ssize_t bytes_read = -1;
+    int start_pos = child_number * block_size;
+    lseek(fd, start_pos, SEEK_SET);
+    bytes_read = bulk_read(fd, buf, block_size);
+    buf[block_size] = '\0';
+    return bytes_read;
 }
+
+volatile sig_atomic_t sig_usr1 = 0;
+void sigusr1_handler(int sigNo) { sig_usr1 = 1; }
 
 int main(int argc, char** argv)
 {
@@ -94,9 +89,61 @@ int main(int argc, char** argv)
         usage(argc, argv);
     
     char* path = argv[1];
+    int fd = open(path, O_RDWR | O_NONBLOCK | O_SYNC);
+    if (fd < 0)
+        ERR("open");
+    
+    struct stat st;
+    fstat(fd, &st);
+    ssize_t file_size = st.st_size;
+    ssize_t block_size = file_size / k + 1;
 
-    create_children(k);
+    pid_t* pids = (pid_t*)malloc(sizeof(pid_t) * k);
+
+    printf("[%d] Hi, I'm a main parent process, my pid is %d\n", getpid(), getpid());
+    for (int i = 1; i <= k; i++)
+    {
+        pid_t pid = fork();
+        switch(pid)
+        {
+            case -1:
+                ERR("fork");
+            case 0:
+                printf("[%d] Hi, I'm a %dth child\n", getpid(), i);
+
+                char* buf = (char*)malloc(sizeof(char) * (block_size + 1));
+                ssize_t bytes_read = child_work(fd, i - 1, block_size, buf);
+
+                sigset_t mask, oldmask;
+                sigemptyset(&mask);
+                sigaddset(&mask, SIGUSR1);
+                sigprocmask(SIG_BLOCK, &mask, &oldmask);
+                sethandler(sigusr1_handler, SIGUSR1);
+
+                while (sig_usr1 == 0) 
+                {
+                    sigsuspend(&oldmask);
+                }
+
+                printf("[%d] Got a SIGUSR1 signal. Terminating...\n", getpid());
+
+                // logika przetwarzania odcinku pliku
+
+                free(buf);
+                exit(EXIT_SUCCESS);
+            default:
+                pids[i - 1] = pid;
+                break;
+        }
+    }
+
+    for (int i = 0; i < k; i++)
+    {
+        kill(pids[i], SIGUSR1);
+    }
     while (wait(NULL) > 0) { /* waiting for all children to finish */}
+    printf("[%d] All children finished their work.\n", getpid());
 
+    close(fd);
     exit(EXIT_SUCCESS);
 }
