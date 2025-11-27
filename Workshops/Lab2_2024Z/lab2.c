@@ -104,7 +104,7 @@ void safe_nanosleep(long nanoseconds)
     struct timespec req, rem;
     req.tv_sec = 0;
     req.tv_nsec = nanoseconds;
-    while (nanosleep(&req, &req) == -1)
+    while (nanosleep(&req, &rem) == -1)
     {
         if (errno == EINTR)
             req = rem;
@@ -139,12 +139,16 @@ void child_write(int child_number, ssize_t block_size, char* buf, char* filename
     ssize_t bytes_written = bulk_write(new_fd, buf, block_size);
     if (bytes_written < 0)
         ERR("bulk_write");
+
+    close(new_fd);
 }
 
 
 
 volatile sig_atomic_t sig_usr1 = 0;
+volatile sig_atomic_t sig_int = 0;
 void sigusr1_handler(int sigNo) { sig_usr1 = 1; }
+void sigint_handler(int sigNo) { sig_int = 1; }
 
 int main(int argc, char** argv)
 {
@@ -193,9 +197,21 @@ int main(int argc, char** argv)
                 }
 
                 printf("[%d] Got a SIGUSR1 signal. Creating a new file...\n", getpid());
-
                 child_write(i - 1, bytes_read, buf, argv[1]);
+                printf("[%d] Finished creating a new file. Waiting for SIGINT...\n", getpid());
+
+                sigdelset(&mask, SIGUSR1);
+                sigaddset(&mask, SIGINT);
+                sigprocmask(SIG_BLOCK, &mask, &oldmask);
+                sethandler(sigint_handler, SIGINT);
+                while (sig_int == 0)
+                {
+                    sigsuspend(&oldmask);
+                }
+                
+                printf("[%d] Got a SIGINT signal. Sending a sigint signal to all group processes and exiting...\n", getpid());
                 free(buf);
+                kill(0, SIGINT);
                 exit(EXIT_SUCCESS);
             default:
                 pids[i - 1] = pid;
@@ -204,13 +220,38 @@ int main(int argc, char** argv)
     }
 
     usleep(1);
+    sigset_t mask, oldmask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGUSR1);
+    sigprocmask(SIG_BLOCK, &mask, &oldmask);
+    sethandler(sigusr1_handler, SIGUSR1);
+    while (sig_usr1 == 0)
+    {
+        sigsuspend(&oldmask);
+    }
     for (int i = 0; i < k; i++)
     {
         kill(pids[i], SIGUSR1);
     }
+
+    sigdelset(&mask, SIGUSR1);
+    sigaddset(&mask, SIGINT);
+    sethandler(sigint_handler, SIGINT);
+    sigprocmask(SIG_BLOCK, &mask, &oldmask);
+    while (sig_int == 0)
+    {
+        sigsuspend(&oldmask);
+    }
+    printf("[%d] Got a SIGINT signal. Sending a sigint signal to all children and exiting...\n", getpid());
+    for (int i = 0; i < k; i++)
+    {
+        kill(pids[i], SIGINT);
+    }
+
     while (wait(NULL) > 0) { /* waiting for all children to finish */}
     printf("[%d] All children finished their work.\n", getpid());
 
+    free(pids);
     close(fd);
     exit(EXIT_SUCCESS);
 }
