@@ -121,3 +121,25 @@ while (!sig_usr1_flag) {
 }
 ```
 
+## Różnica pomiędzy `wait` a `waitpid`
+
+- funkcja `wait(int* status)` zawiesza działanie procesu rodzica do momentu, aż **którykolwiek** z jego procesów potomnych zakończy działanie. Do zmiennej `&status` wpada zakodowana liczba bitowa, która oznacza status, w którym dziecko się zakończyło. Status ten można sprawdzić za pomocą różnych makr:
+    + `WIFEXITED(status)` - zwraca 1, jeśli dziecko zakończyło się normalnie poprzez `exit(0)` albo `return`
+    + `WIFSIGNALED(status)` - zwraca 1, jeśli dziecko zostało zabite przez jakiś sygnał (np. `SIGKILL`)
+    + `WTERMSIG(status)` - zwraca numer sygnału, który zabił dziecko.
+Funkcja `wait` zwraca PID zakończonego dziecka. Jeśli zwróci -1, to oznacza, że zwróciła błąd `ECHILD`, który tak naprawdę nie oznacza błędu logiki, tylko, że nie ma więcej dzieci. A więc zwykle proces rodzica czeka na zakończenie wszystkich dzieci (jeśli jego nie obchodzi stan zakonczenia dzieci) poprzez pętlę:
+```c
+while (wait(NULL) > 0) {}
+```
+- funkcja `waitpid(pid_t pid, int* status, int options)` za pomocą użycia opcji `WNOHANG` służy do czekania na skończone dzieci BEZ blokady procesu rodzica. Czekać można na zakończenie konkretnego dziecka (pid > 0), na dowolne dziecko (pid = -1), na dzieci z tej samej grupy procesów (pid = 0). Do `&status` (podobnie jak w `wait`) wpada zakodowana liczba bitowa ze statusem zakończenia dziecka. Istnieje też zmienna `options` z opcjami:
+    + `0` - domyślna. Blokuje proces rodzica, aż dziecko/dzieci zmienią stan. De facto to samo, co i zwykły `wait`
+    + `WNOHANG` - **nieblokująca** - jeśli dziecko nie zmieniło stanu, zwraca '0' natychmiast. Używa się do sprawdzienia stanu w pętli głównej lub w handlerze sygnałów
+    + `WUNTRACED` - reaguje także na dzieci, które zostały zatrzymane, a nie tylko zakończone.
+    + `WCONTINUED` - reaguje także na dzieci, które zostały wznowione.
+```c
+void sigchld_handler(int sig) {
+    int status;
+    while(waitpid(-1, &status, WNOHANG) > 0) {}
+}
+```
+
