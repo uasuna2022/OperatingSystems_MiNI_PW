@@ -58,20 +58,6 @@ static const char* skip_whitespace(const char* cursor)
     return cursor;
 }
 
-// Copies a segment of the input line into a newly allocated string.
-static char* copy_segment(const char* start, size_t length)
-{
-    char* result = malloc((length + 1) * sizeof(char));
-    if (!result)
-        return NULL;
-
-    if (length > 0) 
-        memcpy(result, start, length);
-    result[length] = '\0';
-
-    return result;
-}
-
 // Parses a single token from the input line, handling quotes and escapes.
 static cli_status parse_token(const char** cursor, token_buffer* buffer)
 {

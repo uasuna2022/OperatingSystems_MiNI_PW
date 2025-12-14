@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "cli.h"
+#include "backup.h"
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,6 +17,9 @@ int main(void)
     char* line = NULL;
     size_t line_capacity = 0;
     bool terminate = false;
+    backup_manager* manager = backup_manager_create();
+    if (!manager)
+        ERR("backup_manager_create");
 
     while (!terminate) 
     {
@@ -48,9 +52,46 @@ int main(void)
             case CLI_NO_COMMAND:
                 fprintf(stderr, "Warning: no command parsed\n");
                 break;
-            case CLI_COMMAND_ADD:
-                // "Add" logic
+            case CLI_COMMAND_ADD: 
+            {
+                const char* src_raw = command.argv[0];
+                for (size_t i = 1; i < command.argc; i++) 
+                {
+                    const char* dst_raw = command.argv[i];
+                    pid_t child_pid = -1;
+                    char* src_norm = NULL;
+                    char* dst_norm = NULL;
+                    char* err_msg = NULL;
+
+                    backup_add_status result = backup_manager_add_pair(manager, src_raw, dst_raw, 
+                        &child_pid, &src_norm, &dst_norm, &err_msg);
+
+                    switch (result) 
+                    {
+                        case BACKUP_ADD_OK:
+                            printf("Added backup %s -> %s (pid %d)\n", src_norm ? src_norm : src_raw, 
+                                dst_norm ? dst_norm : dst_raw, child_pid);
+                            break;
+                        case BACKUP_ADD_ERR_DUPLICATE:
+                            fprintf(stderr, "%s\n", err_msg ? err_msg : "ERROR: duplicate backup");
+                            break;
+                        case BACKUP_ADD_ERR_VALIDATE:
+                            fprintf(stderr, "%s\n", err_msg ? err_msg : "ERROR: validation failed");
+                            break;
+                        case BACKUP_ADD_ERR_FORK:
+                            fprintf(stderr, "%s\n", err_msg ? err_msg : "ERROR: fork failed");
+                            break;
+                        case BACKUP_ADD_ERR_INTERNAL:
+                            fprintf(stderr, "%s\n", err_msg ? err_msg : "ERROR: add failed");
+                            break;
+                    }
+
+                    free(src_norm);
+                    free(dst_norm);
+                    free(err_msg);
+                }
                 break;
+            }
             case CLI_COMMAND_END:
                 // "End" logic
                 break;
@@ -65,15 +106,17 @@ int main(void)
                 break;
             }
 
-        // Debug purposes:
+        /*
         printf("Parsed command type: %d, argc: %zu\n", command.type, command.argc);
         for (size_t i = 0; i < command.argc; i++)
             printf("  argv[%zu]: %s\n", i, command.argv[i]);
-
+        */
 
         cli_free_cmd(&command);
     }
 
     free(line);
+    backup_manager_terminate_all(manager);
+    free_backup_manager(manager);
     return 0;
 }
