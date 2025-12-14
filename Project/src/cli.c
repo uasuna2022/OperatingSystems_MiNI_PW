@@ -72,46 +72,64 @@ static char* copy_segment(const char* start, size_t length)
     return result;
 }
 
-// Parses a quoted token from the input line.
-static cli_status parse_quoted(const char** cursor, char quote, token_buffer* buffer)
+// Parses a single token from the input line, handling quotes and escapes.
+static cli_status parse_token(const char** cursor, token_buffer* buffer)
 {
-    const char* start = *cursor;
-    const char* walker = start;
-
-    while (*walker && *walker != quote)
-        walker += sizeof(char);
-
-    if (*walker != quote)
-        return CLI_STATUS_ERR_UNCLOSED_QUOTE;
-
-    size_t length = (size_t)(walker - start);
-    char* token = copy_segment(start, length);
-    if (!token)
+    const char* walker = *cursor;
+    size_t capacity = 32;
+    size_t length = 0;
+    char* accumulator = malloc(capacity);
+    if (!accumulator)
         return CLI_STATUS_ERR_ALLOC;
 
-    cli_status status = tokens_push(buffer, token);
-    *cursor = walker + sizeof(char);
+    while (*walker && !isspace((unsigned char)*walker)) {
+        if (*walker == '\'' || *walker == '"') {
+            char quote = *walker;
+            walker += sizeof(char);
+            while (*walker && *walker != quote) {
+                if (length + 1 >= capacity) {
+                    capacity *= 2;
+                    char* tmp = realloc(accumulator, capacity);
+                    if (!tmp) 
+                    {
+                        free(accumulator);
+                        return CLI_STATUS_ERR_ALLOC;
+                    }
+                    accumulator = tmp;
+                }
+                accumulator[length] = *walker;
+                length++;
+                walker += sizeof(char);
+            }
+            if (*walker != quote) 
+            {
+                free(accumulator);
+                return CLI_STATUS_ERR_UNCLOSED_QUOTE;
+            }
+            walker += sizeof(char);
+        } 
+        else 
+        {
+            if (length + 1 >= capacity) 
+            {
+                capacity *= 2;
+                char* tmp = realloc(accumulator, capacity);
+                if (!tmp) 
+                {
+                    free(accumulator);
+                    return CLI_STATUS_ERR_ALLOC;
+                }
+                accumulator = tmp;
+            }
+            accumulator[length] = *walker;
+            length++;
+            walker += sizeof(char);
+        }
+    }
 
-    return status;
-}
-
-// Parses an unquoted token from the input line.
-static cli_status parse_unquoted(const char** cursor, token_buffer* buffer)
-{
-    const char* start = *cursor;
-    const char* walker = start;
-
-    while (*walker && !isspace((unsigned char)*walker))
-        walker += sizeof(char);
-
-    size_t length = (size_t)(walker - start);
-    char* token = copy_segment(start, length);
-    if (!token)
-        return CLI_STATUS_ERR_ALLOC;
-
-    cli_status status = tokens_push(buffer, token);
+    accumulator[length] = '\0';
+    cli_status status = tokens_push(buffer, accumulator);
     *cursor = walker;
-
     return status;
 }
 
@@ -142,34 +160,11 @@ cli_status cli_parse_line(const char* line, cli_cmd* out_cmd)
 
     while (cursor && *cursor) 
     {
-        if (*cursor == '\'') // if a single quote (') is found 
+        cli_status status = parse_token(&cursor, &buffer);
+        if (status != CLI_STATUS_OK) 
         {
-            cursor += sizeof(char);
-            cli_status status = parse_quoted(&cursor, '\'', &buffer);
-            if (status != CLI_STATUS_OK) 
-            {
-                tokens_reset(&buffer);
-                return status;
-            }
-        } 
-        else if (*cursor == '"')  // if a double quote (") is found
-        {
-            cursor += sizeof(char);
-            cli_status status = parse_quoted(&cursor, '"', &buffer);
-            if (status != CLI_STATUS_OK) 
-            {
-                tokens_reset(&buffer);
-                return status;
-            }
-        } 
-        else 
-        {
-            cli_status status = parse_unquoted(&cursor, &buffer);
-            if (status != CLI_STATUS_OK) 
-            {
-                tokens_reset(&buffer);
-                return status;
-            }
+            tokens_reset(&buffer);
+            return status;
         }
 
         cursor = skip_whitespace(cursor);
