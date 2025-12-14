@@ -200,8 +200,8 @@ cli_status cli_parse_line(const char* line, cli_cmd* out_cmd)
         return CLI_STATUS_ERR_UNKNOWN_COMMAND;
     }
 
+    out_cmd->type = command_type;
     size_t arg_count = buffer.count - 1;
-
     cli_status status = CLI_STATUS_OK;
 
     switch (command_type) 
@@ -299,5 +299,23 @@ const char* cli_status_message(cli_status status)
         return "Error: invalid number of arguments for command";
     default:
         return "Unknown error";
+    }
+}
+
+const char* cli_usage_message(cli_command_type type)
+{
+    switch (type) {
+    case CLI_COMMAND_ADD:
+        return "usage:\n    add <source_directory> <target_directory1> ... <target_directoryN>";
+    case CLI_COMMAND_END:
+        return "usage:\n    end <source_directory> <target_directory1> ... <target_directoryN>";
+    case CLI_COMMAND_LIST:
+        return "usage:\n    list";
+    case CLI_COMMAND_RESTORE:
+        return "usage:\n    restore <backup_file> <target_directory>";
+    case CLI_COMMAND_EXIT:
+        return "usage:\n    exit";
+    default:
+        return "";
     }
 }

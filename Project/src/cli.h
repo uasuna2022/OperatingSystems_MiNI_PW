@@ -28,5 +28,6 @@ typedef enum {
 cli_status cli_parse_line(const char* line, cli_cmd* out_cmd);
 void cli_free_cmd(cli_cmd* cmd);
 const char* cli_status_message(cli_status status);
+const char* cli_usage_message(cli_command_type type);
 
 

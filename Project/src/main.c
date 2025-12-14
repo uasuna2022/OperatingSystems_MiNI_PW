@@ -34,6 +34,13 @@ int main(void)
             if (message && *message)
                 fprintf(stderr, "%s\n", message);
 
+            if (status == CLI_STATUS_ERR_INVALID_ARGS) 
+            {
+                const char* usage = cli_usage_message(command.type);
+                if (usage && *usage)
+                    fprintf(stderr, "%s\n", usage);
+            }
+
             continue;
         }
 
@@ -41,22 +48,22 @@ int main(void)
             case CLI_NO_COMMAND:
                 fprintf(stderr, "Warning: no command parsed\n");
                 break;
-        case CLI_COMMAND_ADD:
-            // "Add" logic
-            break;
-        case CLI_COMMAND_END:
-            // "End" logic
-            break;
-        case CLI_COMMAND_LIST:
-            // "List" logic
-            break;
-        case CLI_COMMAND_RESTORE:
-            // "Restore" logic
-            break;
-        case CLI_COMMAND_EXIT:
-            terminate = true;
-            break;
-        }
+            case CLI_COMMAND_ADD:
+                // "Add" logic
+                break;
+            case CLI_COMMAND_END:
+                // "End" logic
+                break;
+            case CLI_COMMAND_LIST:
+                // "List" logic
+                break;
+            case CLI_COMMAND_RESTORE:
+                // "Restore" logic
+                break;
+            case CLI_COMMAND_EXIT:
+                terminate = true;
+                break;
+            }
 
         // Debug purposes:
         printf("Parsed command type: %d, argc: %zu\n", command.type, command.argc);
