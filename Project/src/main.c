@@ -8,6 +8,18 @@
 #include <unistd.h>
 #include <errno.h>
 
+static void print_prompt_stdout(void)
+{
+    char* cwd = getcwd(NULL, 0);
+    if (cwd) 
+    {
+        printf("[User]:%s$  ", cwd);
+        free(cwd);
+    } 
+    else printf("[User]:?$  ");
+    fflush(stdout);
+}
+
 #define ERR(source) \
     (perror(source), fprintf(stderr, "%s, line nr. %d\n", __FILE__, __LINE__), \
     exit(EXIT_FAILURE))
@@ -23,6 +35,7 @@ int main(void)
 
     while (!terminate) 
     {
+        print_prompt_stdout();
         ssize_t read = getline(&line, &line_capacity, stdin);
         if (read == -1)
             ERR("getline");
