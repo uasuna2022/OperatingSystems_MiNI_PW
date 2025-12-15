@@ -386,3 +386,19 @@ backup_add_status backup_manager_add_pair(backup_manager* manager, const char* s
         }
     } 
 }
+
+void list_backups(backup_manager* manager)
+{
+    if (!manager || manager->count == 0)
+    {
+        printf("No active backups.\n");
+        return;
+    }
+
+    printf("Active backups:\n");
+    for (size_t i = 0; i < manager->count; i++)
+    {
+        printf(" (%ld) [%d] %s -> %s\n", i + 1, manager->jobs[i].pid,
+             manager->jobs[i].src, manager->jobs[i].dst);
+    }
+}

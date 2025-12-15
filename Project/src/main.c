@@ -109,7 +109,7 @@ int main(void)
                 // "End" logic
                 break;
             case CLI_COMMAND_LIST:
-                // "List" logic
+                list_backups(manager);
                 break;
             case CLI_COMMAND_RESTORE:
                 // "Restore" logic

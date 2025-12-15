@@ -21,3 +21,4 @@ int backup_manager_has_job(backup_manager* manager, const char* src_abs, const c
 backup_add_status backup_manager_add_pair(backup_manager* manager, const char* src_raw, 
     const char* dst_raw, pid_t* out_child_pid, char** out_src_norm, char** out_dst_norm,
     char** out_error_msg);
+void list_backups(backup_manager* manager);
