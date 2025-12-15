@@ -11,6 +11,9 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <wait.h>
+#include <fcntl.h>
+
+#define BUFFER_SIZE 1024
 
 struct backup_job {
     pid_t pid;
@@ -305,6 +308,167 @@ static backup_add_status free_and_return(char* src_absolute, char* dst_absolute,
     return code;
 }
 
+// The function to copy a regular file from source_path to destination_path.
+static int copy_regular_file(const char* source_path, const char* destination_path,
+    char** err, mode_t mode)
+{
+    int source_fd = open(source_path, O_RDONLY);
+    if (source_fd == -1)
+       return -1;
+    int destination_fd = open(destination_path, O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, mode);
+    if (destination_fd == -1)
+    {
+        close(source_fd);
+        return -1;
+    }
+
+    char buffer[BUFFER_SIZE];
+    ssize_t bytes_read;
+    while ((bytes_read = read(source_fd, buffer, BUFFER_SIZE)) > 0)
+    {
+        ssize_t bytes_written = write(destination_fd, buffer, bytes_read);
+        if (bytes_written != bytes_read)
+        {
+            if (err)
+                asprintf(err, "ERROR: write error to %s", destination_path);
+
+            close(source_fd);
+            close(destination_fd);
+            return -1;
+        }
+    }
+    if (bytes_read == -1)
+    {
+        if (err)
+            asprintf(err, "ERROR: read error from %s", source_path);
+        close(source_fd);
+        close(destination_fd);
+        return -1;
+    }
+
+    close(source_fd);
+    close(destination_fd);
+    return 0;
+}
+
+// The function to copy a symlink from source_path to destination_path.
+// If the symlink is *absolute* and point inside root_source, it is adjusted
+// to point inside root_destination instead.
+// I.e. if source_path is /src/links/link1 -> /src/somefile.txt
+// and root source is /src, then assuming root_destination is /dst,
+// the created symlink at destination_path will point to /dst/somefile.txt instead of
+// /src/somefile.txt  (/dst/links/link1 -> /dst/somefile.txt)
+static int copy_symlink(const char* source_path, const char* destination_path, 
+    const char* root_source, const char* root_destination, char** err)
+{
+    char link_target[BUFFER_SIZE];
+    ssize_t read_bytes = readlink(source_path, link_target, BUFFER_SIZE - 1);
+    if (read_bytes == -1)
+    {
+        if (err)
+            asprintf(err, "ERROR: cannot read symlink %s", source_path);
+        return -1;
+    }
+    link_target[read_bytes] = '\0';
+
+    if (link_target[0] == '/' && strncmp(link_target, root_source, strlen(root_source)) == 0)
+    {
+        char new_target[BUFFER_SIZE];
+        const char* suffix = link_target + strlen(root_source);
+        snprintf(new_target, BUFFER_SIZE, "%s%s", root_destination, suffix);
+
+        if (symlink(new_target, destination_path) == -1)
+        {
+            if (err)
+                asprintf(err, "ERROR: cannot create symlink %s -> %s", destination_path, new_target);
+            return -1;
+        }
+    }
+    else 
+    {
+        if (symlink(link_target, destination_path) == -1)
+        {
+            if (err)
+                asprintf(err, "ERROR: cannot create symlink %s -> %s", destination_path, link_target);
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+// The function to copy a directory recursively from source_path to directory_path.
+static int copy_directory_recursive(const char* source_path, const char* directory_path,
+    const char* root_source, const char* root_destination, char** err)
+{
+    DIR* dir = opendir(source_path);
+    if (!dir)
+    {
+        if (err)
+            asprintf(err, "ERROR: cannot open directory %s", source_path);
+        return -1;
+    }
+
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL)
+    {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+
+        char source_entry_path[BUFFER_SIZE];
+        snprintf(source_entry_path, BUFFER_SIZE, "%s/%s", source_path, entry->d_name);
+
+        char destination_entry_path[BUFFER_SIZE];
+        snprintf(destination_entry_path, BUFFER_SIZE, "%s/%s", directory_path, entry->d_name);
+
+        struct stat st;
+        if (lstat(source_entry_path, &st) == -1)
+        {
+            if (err)
+                asprintf(err, "ERROR: cannot stat %s", source_entry_path);
+            closedir(dir);
+            return -1;
+        }
+
+        if (S_ISREG(st.st_mode))
+        {
+            if (copy_regular_file(source_entry_path, destination_entry_path, err, st.st_mode) == -1)
+            {
+                closedir(dir);
+                return -1;
+            }
+        }
+        else if (S_ISLNK(st.st_mode))
+        {
+            if (copy_symlink(source_entry_path, destination_entry_path, root_source, root_destination, err) == -1)
+            {
+                closedir(dir);
+                return -1;
+            }
+        }
+        else if (S_ISDIR(st.st_mode))
+        {
+            if (mkdir(destination_entry_path, st.st_mode) == -1 && errno != EEXIST)
+            {
+                if (err)
+                    asprintf(err, "ERROR: cannot create directory %s", destination_entry_path);
+                closedir(dir);
+                return -1;
+            }
+
+            if (copy_directory_recursive(source_entry_path, destination_entry_path,
+                root_source, root_destination, err) == -1)
+            {
+                closedir(dir);
+                return -1;
+            }
+        }
+    }
+
+    closedir(dir);
+    return 0;
+}
+
 backup_add_status backup_manager_add_pair(backup_manager* manager, const char* src_raw,
     const char* dst_raw, pid_t* out_child_pid, char** out_src_norm, char** out_dst_norm,
     char** out_error_msg)
@@ -359,7 +523,22 @@ backup_add_status backup_manager_add_pair(backup_manager* manager, const char* s
         }
         case 0:
         {
-            // TODO: implement backup worker process here
+            struct stat root_st;
+            if (stat(src_absolute, &root_st) == 0)
+                chmod(dst_absolute, root_st.st_mode);
+
+            if (copy_directory_recursive(src_absolute, dst_absolute,
+                src_absolute, dst_absolute, out_error_msg) == -1)
+            {
+                asprintf(out_error_msg, "ERROR: failed to copy from %s to %s", 
+                    src_absolute, dst_absolute);
+                
+                // TODO: terminate child, free resources properly and inform a parent process.
+                exit(EXIT_FAILURE);
+            }
+
+            // TODO: inform main process about successful completion. 
+            // TODO: inotify logic 
             pause();
             exit(EXIT_SUCCESS);
         }

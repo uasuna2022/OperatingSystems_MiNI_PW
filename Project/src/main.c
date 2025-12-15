@@ -116,6 +116,7 @@ int main(void)
                 break;
             case CLI_COMMAND_EXIT:
                 terminate = true;
+                // TODO: Terminate all backup jobs gracefully
                 break;
             }
 
