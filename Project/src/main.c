@@ -108,8 +108,23 @@ int main(void)
                 break;
             }
             case CLI_COMMAND_END:
-                // "End" logic
+            {
+                const char* src_raw = command.argv[0];
+                for (size_t i = 1; i < command.argc; i++) 
+                {
+                    const char* dst_raw = command.argv[i];
+                    char* err_msg = NULL;
+                    int res = backup_manager_end_pair(manager, src_raw, dst_raw, &err_msg);
+                    if (res == 0) 
+                        printf("Ended backup %s -> %s\n", src_raw, dst_raw);
+                    else if (res == 1) 
+                        fprintf(stderr, "Warning: backup %s -> %s not found\n", src_raw, dst_raw);
+                    else fprintf(stderr, "%s\n", err_msg ? err_msg : "ERROR: failed to end backup");
+                    
+                    free(err_msg);
+                }
                 break;
+            }
             case CLI_COMMAND_LIST:
                 list_backups(manager);
                 break;

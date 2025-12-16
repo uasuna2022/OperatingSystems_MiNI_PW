@@ -14,6 +14,14 @@
 #include <fcntl.h>
 #include <sys/inotify.h>
 #include <limits.h>
+#include <signal.h>
+
+static volatile sig_atomic_t stop_requested = 0;
+static void term_handler(int signo)
+{
+    (void)signo;
+    stop_requested = 1;
+}
 
 #define BUFFER_SIZE 1024
 
@@ -516,24 +524,20 @@ static const char* watch_manager_find_path(struct watch_manager* wm, int wd)
     return NULL;
 }
 
-/*
-static const char* wm_remove(struct watch_manager* wm, int wd)
+static char* wm_remove(struct watch_manager* wm, int wd)
 {
-    for (size_t i = 0; i < wm->count; i++)
+    for (size_t i = 0; i < wm->count; i++) 
     {
-        if (wm->entries[i].wd == wd)
+        if (wm->entries[i].wd == wd) 
         {
-            const char* path = wm->entries[i].path;
-            free(wm->entries[i].path);
+            char* path = wm->entries[i].path; 
             wm->entries[i] = wm->entries[wm->count - 1];
             wm->count--;
             return path;
         }
     }
-
     return NULL;
 }
-    */
 
 static int add_watch_recursive(struct watch_manager* wm, const char* path, char** err)
 {
@@ -576,7 +580,21 @@ static int add_watch_recursive(struct watch_manager* wm, const char* path, char*
 static void handle_event(struct inotify_event* event, struct watch_manager* wm, 
     const char* root_src, const char* root_dst, char** err) 
 {
-    // Ignore events with no name (should not happen in our case)
+    if (event->mask & (IN_DELETE_SELF | IN_IGNORED)) 
+    {
+        if (inotify_rm_watch(wm->inotify_fd, event->wd) == -1) 
+        {
+            if (err)
+                asprintf(err, "ERROR: inotify_rm_watch failed for wd %d", event->wd);
+            return;
+        }
+        char* removed = wm_remove(wm, event->wd);
+        if (removed) 
+            free(removed);
+        
+        return;
+    }
+
     if (event->len == 0) 
     {
         if (err)
@@ -667,12 +685,22 @@ static void run_monitoring_loop(const char* root_src, const char* root_dst, char
 
     // Buffer aligned to inotify_event structure, to avoid potential alignment issues.
     char buffer[4096] __attribute__ ((aligned(__alignof__(struct inotify_event))));
-    
-    while (1) 
+
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = term_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGTERM, &sa, NULL);
+
+    while (!stop_requested) 
     {
         ssize_t len = read(wm.inotify_fd, buffer, sizeof(buffer));
-        if (len == -1 && errno != EAGAIN) 
-        {
+        if (len == -1) {
+            if (errno == EINTR) 
+                break;
+            if (errno == EAGAIN)
+                continue;
             if (err)
                 asprintf(err, "ERROR: inotify read failed");
             break;
@@ -682,21 +710,24 @@ static void run_monitoring_loop(const char* root_src, const char* root_dst, char
         while (ptr < buffer + len) 
         {
             struct inotify_event* event = (struct inotify_event*)ptr;
-            
             handle_event(event, &wm, root_src, root_dst, err);
-
             ptr += sizeof(struct inotify_event) + event->len;
         }
     }
     
-    close(wm.inotify_fd);
-    for (size_t i = 0; i < wm.count; i++)
+    printf("[%d] Stopped monitoring changes.\n", getpid());
+    for (size_t i = 0; i < wm.count; i++) 
     {
+        if (inotify_rm_watch(wm.inotify_fd, wm.entries[i].wd) == -1) 
+        {
+            if (err)
+                asprintf(err, "ERROR: inotify_rm_watch failed for wd %d", wm.entries[i].wd);
+            continue;
+        }
         free(wm.entries[i].path);
-        close(wm.entries[i].wd);
     }
-
     free(wm.entries);
+    close(wm.inotify_fd);
 }
 
 backup_add_status backup_manager_add_pair(backup_manager* manager, const char* src_raw,
@@ -764,13 +795,11 @@ backup_add_status backup_manager_add_pair(backup_manager* manager, const char* s
                     src_absolute, dst_absolute);
                 
                 // TODO: terminate child, free resources properly and inform a parent process.
+
                 exit(EXIT_FAILURE);
             }
 
-            // TODO: inform main process about successful completion. 
-            // TODO: inotify logic 
             run_monitoring_loop(src_absolute, dst_absolute, out_error_msg);
-            pause();
             exit(EXIT_SUCCESS);
         }
         default:
@@ -811,4 +840,63 @@ void list_backups(backup_manager* manager)
         printf(" (%ld) [%d] %s -> %s\n", i + 1, manager->jobs[i].pid,
              manager->jobs[i].src, manager->jobs[i].dst);
     }
+}
+
+// Terminate a specific backup job identified by source and destination paths.
+// 0 -> success, -1 -> error, 1 -> not found
+int backup_manager_end_pair(backup_manager* manager, const char* src_raw,
+    const char* dst_raw, char** out_error_msg)
+{
+    if (!manager) 
+    {
+        if (out_error_msg) 
+            asprintf(out_error_msg, "ERROR: manager is NULL");
+        return -1;
+    }
+
+    char* source_absolute = realpath(src_raw, NULL);
+    if (!source_absolute) 
+    {
+        if (out_error_msg) 
+            asprintf(out_error_msg, "ERROR: cannot resolve source %s", src_raw);
+        return -1;
+    }
+
+    char* destination_absolute = realpath(dst_raw, NULL);
+    if (!destination_absolute) 
+    {
+        if (out_error_msg) 
+            asprintf(out_error_msg, "ERROR: cannot resolve destination %s", dst_raw);
+        free(source_absolute);
+        return -1;
+    }
+
+    for (size_t i = 0; i < manager->count; i++) {
+        if (strcmp(manager->jobs[i].src, source_absolute) == 0 &&
+            strcmp(manager->jobs[i].dst, destination_absolute) == 0) 
+        {
+            pid_t pid = manager->jobs[i].pid;
+
+            if (pid > 0) 
+            {
+                kill(pid, SIGTERM);
+                int status = 0;
+                waitpid(pid, &status, 0);
+            }
+
+            free_job(&manager->jobs[i]);
+            if (i != manager->count - 1)
+                manager->jobs[i] = manager->jobs[manager->count - 1];
+            manager->count--;
+
+            free(source_absolute);
+            free(destination_absolute);
+            return 0;
+        }
+    }
+
+    free(source_absolute);
+    free(destination_absolute);
+
+    return 1; // if not found
 }
