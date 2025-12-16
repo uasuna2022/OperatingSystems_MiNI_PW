@@ -1,4 +1,6 @@
-#pragma once
+#ifndef SRC_BACKUP_H
+#define SRC_BACKUP_H
+
 #include <stddef.h>
 #include <sys/types.h>
 
@@ -25,3 +27,5 @@ void list_backups(backup_manager* manager);
 int backup_manager_end_pair(backup_manager* manager, const char* src_raw, const char* dst_raw, char** out_error_msg);
 int backup_manager_restore(struct watch_manager* wm, const char* src_raw, const char* dst_raw,
     char** out_error_msg);
+
+#endif
