@@ -488,6 +488,41 @@ static int copy_directory_recursive(const char* source_path, const char* directo
     closedir(dir);
     return 0;
 }
+static int remove_directory_recursive(const char* path, char** err)
+{
+    DIR* dir = opendir(path);
+    if (!dir) 
+    {
+        if (err)
+            asprintf(err, "ERROR: cannot open directory %s", path);
+        return -1;
+    }
+
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+
+        char full_path[PATH_MAX];
+        snprintf(full_path, sizeof(full_path), "%s/%s", path, entry->d_name);
+
+        struct stat st;
+        if (lstat(full_path, &st) == -1) 
+        {
+            if (err)
+                asprintf(err, "ERROR: cannot stat %s", full_path);
+            closedir(dir);
+            return -1;
+        }
+
+        if (S_ISDIR(st.st_mode)) 
+            remove_directory_recursive(full_path, err);
+        else unlink(full_path);
+    }
+
+    closedir(dir);
+    return rmdir(path);
+}
 
 // Watch manager helper functions
 static void watch_manager_add(struct watch_manager* wm, int wd, const char* path, char** err)
@@ -628,7 +663,7 @@ static void handle_event(struct inotify_event* event, struct watch_manager* wm,
     if ((event->mask & IN_DELETE) || (event->mask & IN_MOVED_FROM)) 
     {   
         if (event->mask & IN_ISDIR) 
-            rmdir(full_destination_path);
+            remove_directory_recursive(full_destination_path, err);
         else unlink(full_destination_path);
         
         printf("[SYNC] Deleted: %s\n", full_destination_path);
@@ -784,6 +819,8 @@ backup_add_status backup_manager_add_pair(backup_manager* manager, const char* s
         }
         case 0:
         {
+            free_backup_manager(manager);
+
             struct stat root_st;
             if (stat(src_absolute, &root_st) == 0)
                 chmod(dst_absolute, root_st.st_mode);

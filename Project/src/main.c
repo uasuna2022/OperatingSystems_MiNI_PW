@@ -7,27 +7,37 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <errno.h>
-
-/*
-static void print_prompt_stdout(void)
-{
-    char* cwd = getcwd(NULL, 0);
-    if (cwd) 
-    {
-        printf("[User]:%s$  ", cwd);
-        free(cwd);
-    } 
-    else printf("[User]:?$  ");
-    fflush(stdout);
-}
-*/
+#include <signal.h>
+#include <string.h>
 
 #define ERR(source) \
     (perror(source), fprintf(stderr, "%s, line nr. %d\n", __FILE__, __LINE__), \
     exit(EXIT_FAILURE))
 
+static volatile sig_atomic_t terminate_requested = 0;
+void term_sig_handler(int sig) 
+{ 
+    (void)sig; 
+    terminate_requested = 1; 
+}
+
 int main(void)
 {
+    struct sigaction sa_term;
+    memset(&sa_term, 0, sizeof(sa_term));
+    sa_term.sa_handler = term_sig_handler;
+    sigemptyset(&sa_term.sa_mask);
+    sa_term.sa_flags = 0;
+    sigaction(SIGINT, &sa_term, NULL);
+    sigaction(SIGTERM, &sa_term, NULL);
+
+    sigset_t mask;
+    sigfillset(&mask);
+    sigdelset(&mask, SIGINT);
+    sigdelset(&mask, SIGTERM);
+    sigdelset(&mask, SIGCHLD);
+    sigprocmask(SIG_SETMASK, &mask, NULL);
+
     char* line = NULL;
     size_t line_capacity = 0;
     bool terminate = false;
@@ -37,10 +47,26 @@ int main(void)
 
     while (!terminate) 
     {
-        // print_prompt_stdout();
+        printf("$ ");
+        if (terminate_requested) 
+        {
+            terminate = true;
+            break;
+        }
         ssize_t read = getline(&line, &line_capacity, stdin);
-        if (read == -1)
+        if (read == -1) 
+        {
+            if (errno == EINTR) 
+            {
+                if (terminate_requested) 
+                {
+                    terminate = true;
+                    break;
+                }
+                continue;
+            }
             ERR("getline");
+        }
 
         if (read > 0 && line[read - 1] == '\n')
             line[read - 1] = '\0';
@@ -133,7 +159,6 @@ int main(void)
                 break;
             case CLI_COMMAND_EXIT:
                 terminate = true;
-                // TODO: Terminate all backup jobs gracefully
                 break;
             }
 
