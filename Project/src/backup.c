@@ -574,6 +574,29 @@ static char* wm_remove(struct watch_manager* wm, int wd)
     return NULL;
 }
 
+// Remove all watches whose watched path is inside (or equal to) `path`.
+// Frees the corresponding path strings and removes entries from the map.
+static void remove_watches_under(struct watch_manager* wm, const char* path)
+{
+    if (!wm || wm->count == 0 || !path)
+        return;
+
+    for (size_t i = 0; i < wm->count; ) 
+    {
+        const char* entry_path = wm->entries[i].path;
+        if (path_is_prefix(path, entry_path)) 
+        {
+            inotify_rm_watch(wm->inotify_fd, wm->entries[i].wd);
+
+            free(wm->entries[i].path);
+            wm->entries[i] = wm->entries[wm->count - 1];
+            wm->count--;
+
+        } 
+        else i++;
+    }
+}
+
 static int add_watch_recursive(struct watch_manager* wm, const char* path, char** err)
 {
     int wd = inotify_add_watch(wm->inotify_fd, path, 
@@ -936,4 +959,234 @@ int backup_manager_end_pair(backup_manager* manager, const char* src_raw,
     free(destination_absolute);
 
     return 1; // if not found
+}
+
+
+// "Restore" helpers
+// This function recursively goes through the source directory and removes files/directories, 
+// that don't exist in the destination directory.
+static int tidyup_source_recursive(struct watch_manager* wm, const char* current_path, const char* current_destination,
+    char** err)
+{
+    DIR* dir = opendir(current_path);
+    if (!dir) 
+    {
+        if (err)
+            asprintf(err, "ERROR: cannot open directory %s", current_path);
+        return -1;
+    }
+
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL) 
+    {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+
+        char source_entry_path[BUFFER_SIZE];
+        snprintf(source_entry_path, BUFFER_SIZE, "%s/%s", current_path, entry->d_name);
+
+        char destination_entry_path[BUFFER_SIZE];
+        snprintf(destination_entry_path, BUFFER_SIZE, "%s/%s", current_destination, entry->d_name);
+
+        struct stat st_dst;
+        if (lstat(destination_entry_path, &st_dst) == -1 && errno == ENOENT)
+        {
+            struct stat st_src;
+            if (lstat(source_entry_path, &st_src) == 0) 
+            {
+                if (S_ISDIR(st_src.st_mode)) 
+                {
+                    remove_watches_under(wm, source_entry_path);
+                    remove_directory_recursive(source_entry_path, err);
+                } 
+                else 
+                {
+                    remove_watches_under(wm, source_entry_path);
+                    unlink(source_entry_path);
+                }
+                printf("[RESTORE] Removed: %s\n", source_entry_path);
+            }
+        }
+        else if (lstat(destination_entry_path, &st_dst) == 0 && S_ISDIR(st_dst.st_mode)) 
+            tidyup_source_recursive(wm, source_entry_path, destination_entry_path, err);
+  
+    }
+
+    closedir(dir);
+    return 0;
+}
+
+// This function restores a symlink at source_path based on the symlink found at destination_path.
+// The logic is similar to copy_symlink function.
+static int restore_symlink(const char* source_path, const char* destination_path,
+    const char* source_root, const char* destination_root, char** err)
+{
+    char link_target[BUFFER_SIZE];
+    ssize_t read_bytes = readlink(destination_path, link_target, BUFFER_SIZE - 1);
+    if (read_bytes == -1)
+    {
+        if (err)
+            asprintf(err, "ERROR: cannot read symlink %s", destination_path);
+        return -1;
+    }
+    link_target[read_bytes] = '\0'; 
+
+    if (link_target[0] == '/' &&
+        strncmp(link_target, destination_root, strlen(destination_root)) == 0)
+    {
+        char new_target[BUFFER_SIZE];
+        const char* suffix = link_target + strlen(destination_root);
+        snprintf(new_target, BUFFER_SIZE, "%s%s", source_root, suffix);
+
+        unlink(source_path);
+
+        if (symlink(new_target, source_path) == -1)
+        {
+            if (err)
+                asprintf(err, "ERROR: cannot create symlink %s -> %s", source_path, new_target);
+            return -1;
+        }
+    }
+    else 
+    {
+        unlink(source_path);
+        if (symlink(link_target, source_path) == -1)
+        {
+            if (err)
+                asprintf(err, "ERROR: cannot create symlink %s -> %s", source_path, link_target);
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+// The function to restore files from destination to source recursively.
+static int restore_recursive(const char* current_source, const char* current_destination,
+    const char* source_root, const char* destination_root, char** err)
+{
+    DIR* dir = opendir(current_destination);
+    if (!dir) 
+    {
+        if (err)
+            asprintf(err, "ERROR: cannot open directory %s", current_destination);
+        return -1;
+    }
+
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL) 
+    {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+
+        char source_entry_path[BUFFER_SIZE];
+        snprintf(source_entry_path, BUFFER_SIZE, "%s/%s", current_source, entry->d_name);
+
+        char destination_entry_path[BUFFER_SIZE];
+        snprintf(destination_entry_path, BUFFER_SIZE, "%s/%s", current_destination, entry->d_name);
+
+        struct stat st_dst;
+        if (lstat(destination_entry_path, &st_dst) == -1) 
+        {
+            if (err)
+                asprintf(err, "ERROR: cannot stat %s", destination_entry_path);
+            closedir(dir);
+            return -1;
+        }
+
+        struct stat st_src;
+        int src_exists = (lstat(source_entry_path, &st_src) == 0);  
+
+        if (S_ISDIR(st_dst.st_mode)) 
+        {
+            if (!src_exists) 
+            {
+                if (mkdir(source_entry_path, st_dst.st_mode) == -1 && errno != EEXIST) 
+                {
+                    if (err)
+                        asprintf(err, "ERROR: cannot create directory %s", source_entry_path);
+                    closedir(dir);
+                    return -1;
+                }
+                printf("[RESTORE] Created directory: %s\n", source_entry_path);
+            }
+
+            restore_recursive(source_entry_path, destination_entry_path,
+                source_root, destination_root, err);
+        } 
+        else if (S_ISREG(st_dst.st_mode)) 
+        {
+            int needs_restore = 1;
+            if (src_exists && S_ISREG(st_src.st_mode)) 
+            {
+                if (st_src.st_size == st_dst.st_size && st_src.st_mtime == st_dst.st_mtime) 
+                    needs_restore = 0;
+            }
+
+            if (needs_restore)
+            {
+                if (copy_regular_file(destination_entry_path, source_entry_path,
+                     err, st_dst.st_mode) == 0) 
+                {
+                    struct timespec times[2];
+                    times[0] = st_dst.st_atim;
+                    times[1] = st_dst.st_mtim;
+                    utimensat(AT_FDCWD, source_entry_path, times, 0);
+
+                    printf("[RESTORE] Restored file: %s\n", source_entry_path);
+                }
+            }
+        } 
+        else if (S_ISLNK(st_dst.st_mode))
+        {
+            restore_symlink(source_entry_path, destination_entry_path,
+                source_root, destination_root, err);
+            printf("[RESTORE] Restored symlink: %s\n", source_entry_path);
+        }
+    }
+
+    closedir(dir);
+    return 0;
+}
+
+int backup_manager_restore(struct watch_manager* wm, const char* src_raw, 
+    const char* dst_raw, char** out_error_msg)
+{
+    char* root_src = NULL; 
+    char* root_dst = NULL; 
+
+    if (ensure_directory_exists(src_raw, out_error_msg) == -1) 
+        return -1;
+    root_src = realpath(src_raw, NULL);
+    
+    char* resolved_dst = realpath(dst_raw, NULL);
+    if (!resolved_dst) 
+    {
+        if (out_error_msg) 
+            asprintf(out_error_msg, "ERROR: backup directory %s does not exist", dst_raw);
+        free(root_src);
+        return -1;
+    }
+    root_dst = resolved_dst;
+
+    printf("Starting RESTORE from '%s' to '%s'...\n", root_dst, root_src);
+
+    if (tidyup_source_recursive(wm, root_src, root_dst, out_error_msg) == -1) 
+    {
+        free(root_src);
+        free(root_dst);
+        return -1;
+    }
+
+    if (restore_recursive(root_src, root_dst, root_src, root_dst, out_error_msg) == -1) {
+        free(root_src);
+        free(root_dst);
+        return -1;
+    }
+
+    printf("Restore completed successfully.\n");
+
+    free(root_src);
+    free(root_dst);
+    return 0;
 }

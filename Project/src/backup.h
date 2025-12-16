@@ -3,6 +3,8 @@
 #include <sys/types.h>
 
 typedef struct backup_manager backup_manager;
+/* forward declaration for watch_manager used by restore API */
+struct watch_manager;
 
 typedef enum {
     BACKUP_ADD_OK = 0,
@@ -21,3 +23,5 @@ backup_add_status backup_manager_add_pair(backup_manager* manager, const char* s
     char** out_error_msg);
 void list_backups(backup_manager* manager);
 int backup_manager_end_pair(backup_manager* manager, const char* src_raw, const char* dst_raw, char** out_error_msg);
+int backup_manager_restore(struct watch_manager* wm, const char* src_raw, const char* dst_raw,
+    char** out_error_msg);

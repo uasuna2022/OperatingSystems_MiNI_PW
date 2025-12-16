@@ -155,8 +155,17 @@ int main(void)
                 list_backups(manager);
                 break;
             case CLI_COMMAND_RESTORE:
-                // "Restore" logic
+            {
+                const char* src_raw = command.argv[0];
+                const char* dst_raw = command.argv[1];
+                char* err_msg = NULL;
+
+                if (backup_manager_restore(NULL, src_raw, dst_raw, &err_msg) == -1) 
+                    fprintf(stderr, "%s\n", err_msg ? err_msg : "ERROR: restore failed");
+                free(err_msg);
                 break;
+            }
+
             case CLI_COMMAND_EXIT:
                 terminate = true;
                 break;
