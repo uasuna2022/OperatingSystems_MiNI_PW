@@ -12,6 +12,8 @@
 #include <unistd.h>
 #include <wait.h>
 #include <fcntl.h>
+#include <sys/inotify.h>
+#include <limits.h>
 
 #define BUFFER_SIZE 1024
 
@@ -27,7 +29,17 @@ struct backup_manager {
     size_t capacity;
 };
 
-// Static helpers
+struct watch_map_entry {
+    int wd;
+    char* path;
+};
+struct watch_manager {
+    struct watch_map_entry* entries;
+    int inotify_fd;
+    size_t count;
+    size_t capacity;
+};
+
 static void free_job(struct backup_job* job)
 {
     if (!job)
@@ -315,7 +327,7 @@ static int copy_regular_file(const char* source_path, const char* destination_pa
     int source_fd = open(source_path, O_RDONLY);
     if (source_fd == -1)
        return -1;
-    int destination_fd = open(destination_path, O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, mode);
+    int destination_fd = open(destination_path, O_WRONLY | O_CREAT | O_TRUNC, mode);
     if (destination_fd == -1)
     {
         close(source_fd);
@@ -469,6 +481,224 @@ static int copy_directory_recursive(const char* source_path, const char* directo
     return 0;
 }
 
+// Watch manager helper functions
+static void watch_manager_add(struct watch_manager* wm, int wd, const char* path, char** err)
+{
+    if (wm->count == wm->capacity) 
+    {
+        size_t new_capacity = wm->capacity == 0 ? 4 : wm->capacity * 2;
+        struct watch_map_entry* new_entries = realloc(wm->entries, new_capacity * 
+            sizeof(struct watch_map_entry));
+        if (!new_entries) 
+        {
+            if (err)
+                asprintf(err, "ERROR: out of memory");
+            return;
+        }
+
+        wm->entries = new_entries;
+        wm->capacity = new_capacity;
+    }
+
+    wm->entries[wm->count].wd = wd;
+    wm->entries[wm->count].path = strdup(path);
+    wm->count++;
+}
+
+static const char* watch_manager_find_path(struct watch_manager* wm, int wd)
+{
+    for (size_t i = 0; i < wm->count; i++)
+    {
+        if (wm->entries[i].wd == wd)
+            return wm->entries[i].path;
+    }
+
+    return NULL;
+}
+
+/*
+static const char* wm_remove(struct watch_manager* wm, int wd)
+{
+    for (size_t i = 0; i < wm->count; i++)
+    {
+        if (wm->entries[i].wd == wd)
+        {
+            const char* path = wm->entries[i].path;
+            free(wm->entries[i].path);
+            wm->entries[i] = wm->entries[wm->count - 1];
+            wm->count--;
+            return path;
+        }
+    }
+
+    return NULL;
+}
+    */
+
+static int add_watch_recursive(struct watch_manager* wm, const char* path, char** err)
+{
+    int wd = inotify_add_watch(wm->inotify_fd, path, 
+        IN_CREATE | IN_DELETE | IN_MODIFY | IN_MOVED_FROM | IN_MOVED_TO | IN_ATTRIB | IN_DELETE_SELF);
+
+    if (wd < 0)
+        return -1;
+
+    watch_manager_add(wm, wd, path, err);
+
+    DIR* dir = opendir(path);
+    if (!dir)
+        return -1;
+
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL)
+    {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+
+        char entry_path[BUFFER_SIZE];
+        snprintf(entry_path, BUFFER_SIZE, "%s/%s", path, entry->d_name);
+
+        struct stat st;
+        if (lstat(entry_path, &st) == -1)
+            continue;
+
+        if (S_ISDIR(st.st_mode))
+            add_watch_recursive(wm, entry_path, err);
+    }
+
+    closedir(dir);
+    return 0;
+}
+
+// Main event handling function. Gets called for each inotify event. 
+// Receives the inotify_event structure, the watch manager to resolve paths, 
+// the root source and destination paths for symlink adjustments, and an error message pointer.
+static void handle_event(struct inotify_event* event, struct watch_manager* wm, 
+    const char* root_src, const char* root_dst, char** err) 
+{
+    // Ignore events with no name (should not happen in our case)
+    if (event->len == 0) 
+    {
+        if (err)
+            asprintf(err, "ERROR: inotify event with no name");
+        return;
+    }
+
+    // Find a full source path from watch descriptor
+    const char* directiry_path = watch_manager_find_path(wm, event->wd);
+    if (!directiry_path) 
+    {
+        if (err)
+            asprintf(err, "ERROR: unknown watch descriptor %d", event->wd);
+        return;
+    }
+
+    // Find full source path
+    char full_source_path[PATH_MAX];
+    snprintf(full_source_path, sizeof(full_source_path), "%s/%s", directiry_path, event->name);
+
+    // Find full destination path
+    char full_destination_path[PATH_MAX];
+    const char* relative = directiry_path + strlen(root_src); 
+    
+    if (*relative == '/') 
+        snprintf(full_destination_path, sizeof(full_destination_path), "%s%s/%s",
+            root_dst, relative, event->name);
+    else snprintf(full_destination_path, sizeof(full_destination_path), "%s/%s",
+        root_dst, event->name);
+    
+    if ((event->mask & IN_DELETE) || (event->mask & IN_MOVED_FROM)) 
+    {   
+        if (event->mask & IN_ISDIR) 
+            rmdir(full_destination_path);
+        else unlink(full_destination_path);
+        
+        printf("[SYNC] Deleted: %s\n", full_destination_path);
+    }
+    
+    else if ((event->mask & IN_CREATE) || (event->mask & IN_MODIFY) || 
+        (event->mask & IN_MOVED_TO) || (event->mask & IN_ATTRIB)) 
+    {
+        struct stat st;
+        if (lstat(full_source_path, &st) == -1) 
+        {
+            if (err)
+                asprintf(err, "ERROR: cannot stat %s", full_source_path);
+            return;
+        }
+
+        if (S_ISDIR(st.st_mode)) 
+        {
+            if (event->mask & IN_CREATE || event->mask & IN_MOVED_TO) 
+            {
+                if (mkdir(full_destination_path, st.st_mode) == -1 && errno != EEXIST) 
+                {
+                    if (err)
+                        asprintf(err, "ERROR: cannot create directory %s", full_destination_path);
+                    return;
+                }
+                add_watch_recursive(wm, full_source_path, err);
+            }    
+        } 
+        else if (S_ISREG(st.st_mode)) 
+            copy_regular_file(full_source_path, full_destination_path, err, st.st_mode);
+        
+        else if (S_ISLNK(st.st_mode)) 
+            copy_symlink(full_source_path, full_destination_path, root_src, root_dst, err);
+        
+        printf("[SYNC] Updated: %s\n", full_destination_path);
+    }
+}
+
+static void run_monitoring_loop(const char* root_src, const char* root_dst, char** err) 
+{
+    struct watch_manager wm = {0};
+    wm.inotify_fd = inotify_init();
+    
+    if (wm.inotify_fd < 0) 
+    {
+        if (err)
+            asprintf(err, "ERROR: inotify_init failed");
+        return;
+    }
+
+    add_watch_recursive(&wm, root_src, err);
+    printf("[%d] Started monitoring changes...\n", getpid());
+
+    // Buffer aligned to inotify_event structure, to avoid potential alignment issues.
+    char buffer[4096] __attribute__ ((aligned(__alignof__(struct inotify_event))));
+    
+    while (1) 
+    {
+        ssize_t len = read(wm.inotify_fd, buffer, sizeof(buffer));
+        if (len == -1 && errno != EAGAIN) 
+        {
+            if (err)
+                asprintf(err, "ERROR: inotify read failed");
+            break;
+        }
+
+        const char* ptr = buffer;
+        while (ptr < buffer + len) 
+        {
+            struct inotify_event* event = (struct inotify_event*)ptr;
+            
+            handle_event(event, &wm, root_src, root_dst, err);
+
+            ptr += sizeof(struct inotify_event) + event->len;
+        }
+    }
+    
+    close(wm.inotify_fd);
+    for (size_t i = 0; i < wm.count; i++)
+    {
+        free(wm.entries[i].path);
+        close(wm.entries[i].wd);
+    }
+
+    free(wm.entries);
+}
+
 backup_add_status backup_manager_add_pair(backup_manager* manager, const char* src_raw,
     const char* dst_raw, pid_t* out_child_pid, char** out_src_norm, char** out_dst_norm,
     char** out_error_msg)
@@ -539,6 +769,7 @@ backup_add_status backup_manager_add_pair(backup_manager* manager, const char* s
 
             // TODO: inform main process about successful completion. 
             // TODO: inotify logic 
+            run_monitoring_loop(src_absolute, dst_absolute, out_error_msg);
             pause();
             exit(EXIT_SUCCESS);
         }
