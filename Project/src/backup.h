@@ -5,7 +5,7 @@
 #include <sys/types.h>
 
 typedef struct backup_manager backup_manager;
-/* forward declaration for watch_manager used by restore API */
+
 struct watch_manager;
 
 typedef enum {
