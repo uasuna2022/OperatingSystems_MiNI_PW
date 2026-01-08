@@ -79,3 +79,111 @@ void* thread_function(void* arg)
 }
 ```
 
+## Muteksy (mutexes)
+**Muteksy** - podstawowe narzędzie do synchronizacji wątków. Służą do zapewnienia wzajemnego wykluczania (mutual exclusion) podczas dostępu do zasobów współdzielonych. Rozwiązują problem race condition.
+**Intuicja**: muteks to jak zamek na drzwiach do jakiegoś pokoju. Tylko jedna osoba (wątek) może wejść do pokoju (sekcji krytycznej) w danym momencie. Inne osoby muszą poczekać, aż pierwsza osoba wyjdzie i odda klucz (odblokuje muteks).
+`pthread_mutex_t` - typ danych reprezentujący muteks.
+**Przykład**:
+1. *Zablokowanie* (lock). Wątek A wywołuje funkcję blokującą. Jeśli muteks jest wolny, A staje się jego właścicielem i kontynuuje swoje zadanie. 
+2. *Oczekiwanie* (waiting). Jeśli w tym czasie wątek B próbuje zablokować ten sam muteks, to zostaje zablokowany i czeka w kolejce, aż A go odblokuje.
+3. *Sekcja krytyczna* (critical section). Wątek A wykonuje operacje na zasobach współdzielonych, mając wyłączny dostęp. Nikt mu nie przeszkadza.
+4. *Odblokowanie* (unlock). Po zakończeniu pracy w sekcji krytycznej, A odblokowuje muteks, zwalniając blokadę i pozwalając innym wątkom (np. B) na kontynuację.
+5. *Przekazanie*. System budzi wątek B, który był zablokowany, i pozwala mu zablokować muteks i wejść do sekcji krytycznej.
+
+WAŻNA ZASADA: Tylko właściciel muteksu (wątek, który go zablokował) może go odblokować. Próba odblokowania muteksu przez inny wątek prowadzi do błędu.
+
+### Podstawowe funkcje do obsługi muteksów
+- `int pthread_mutex_init(pthread_mutex_t* mutex, const pthread_mutexattr_t* attr)` - inicjalizuje muteks. `attr` może być `NULL`, co ustawia domyślne atrybuty. `mutex` to wskaźnik do zmiennej typu `pthread_mutex_t`. Zwraca 0 w przypadku sukcesu, lub kod błędu.
+- `int pthread_mutex_destroy(pthread_mutex_t* mutex)` - niszczy muteks i zwalnia zasoby. Muteks musi być odblokowany i nie może być używany przez żaden wątek w momencie niszczenia. Zwraca 0 w przypadku sukcesu, lub kod błędu. Jeśli muteks jest nadal zablokowany lub używany, zwraca błąd `EBUSY`.
+- `int pthread_mutex_lock(pthread_mutex_t* mutex)` - blokuje muteks. Jeśli muteks jest już zablokowany przez inny wątek, to wywołujący wątek zostaje zablokowany i czeka, aż muteks zostanie odblokowany. Zwraca 0 w przypadku sukcesu, lub kod błędu.
+- `int pthread_mutex_unlock(pthread_mutex_t* mutex)` - odblokowuje muteks. Tylko wątek, który zablokował muteks, może go odblokować. Zwraca 0 w przypadku sukcesu, lub kod błędu. Jeśli inny wątek próbuje odblokować muteks, zwraca błąd `EPERM`.
+- `int pthread_mutex_trylock(pthread_mutex_t* mutex)` - próbuje zablokować muteks bez blokowania wątku. Jeśli muteks jest wolny, zostaje zablokowany i funkcja zwraca 0. Jeśli muteks jest już zablokowany, funkcja zwraca błąd `EBUSY` i wątek kontynuuje działanie bez blokowania.
+
+### Przykład użycia muteksu
+```c
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#define NUM_THREADS 3
+#define ERR(source) (perror(source), fprintf(stderr, "%s, line nr. %d\n", __FILE__, __LINE__), exit(EXIT_FAILURE))
+
+long counter = 0; // Zasób współdzielony poprzez wszystkie watki
+pthread_mutex_t counter_mutex; // Muteks do synchronizacji dostępu do counter
+
+void* increment_counter(void* arg)
+{
+    for (int i = 0; i < 1000000; i++)
+    {
+        pthread_mutex_lock(&counter_mutex); 
+        counter++; // Sekcja krytyczna
+        pthread_mutex_unlock(&counter_mutex); 
+    }
+
+    return (void*)counter; 
+}
+
+int main (int argc, char** argv)
+{
+    pthread_t* threads = (pthread_t*)malloc(NUM_THREADS * sizeof(pthread_t));
+    if (!threads)
+        ERR("Malloc failed");
+
+    if(pthread_mutex_init(&counter_mutex, NULL))
+        ERR("Mutex init failed");
+
+    for (int i = 0; i < NUM_THREADS; i++)
+    {
+        pthread_create(&threads[i], NULL, increment_counter, NULL);
+        if (threads[i] < 0)
+            ERR("Thread creation failed");
+    }
+
+    int* counters_at_the_end = (int*)malloc(NUM_THREADS * sizeof(int));
+    if (!counters_at_the_end)
+        ERR("Malloc failed");
+
+    for (int i = 0; i < NUM_THREADS; i++)
+    {
+        void* ret_val;
+        if (pthread_join(threads[i], &ret_val))
+            ERR("Thread join failed");
+        counters_at_the_end[i] = (int)(long)ret_val;
+    }
+
+    printf("Final counter value: %ld\n", counter);
+    for (int i = 0; i < NUM_THREADS; i++)
+    {
+        printf("Counter value from thread %d: %d\n", i, counters_at_the_end[i]);
+    }
+
+    pthread_mutex_destroy(&counter_mutex);
+    free(threads);
+    free(counters_at_the_end);
+
+    return EXIT_SUCCESS;
+}
+```
+
+### Konfiguracja Muteksów (Atrybuty)
+
+Domyślnie (`NULL`) muteksy mogą powodować zakleszczenia przy ponownym zablokowaniu. Aby zmienić to zachowanie, używamy obiektu atrybutów `pthread_mutexattr_t`.
+
+#### Procedura inicjalizacji
+```c
+pthread_mutex_t mtx;
+pthread_mutexattr_t attr; 
+
+// 1. Inicjalizacja atrybutów
+pthread_mutexattr_init(&attr);
+
+// 2. Ustawienie typu (np. na rekurencyjny lub z obsługą błędów)
+pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK);
+
+// 3. Inicjalizacja muteksu z wykorzystaniem atrybutów
+pthread_mutex_init(&mtx, &attr);
+
+// 4. Sprzątanie atrybutów (nie są już potrzebne po stworzeniu muteksu)
+pthread_mutexattr_destroy(&attr);
+```
+
