@@ -187,3 +187,207 @@ pthread_mutex_init(&mtx, &attr);
 pthread_mutexattr_destroy(&attr);
 ```
 
+## Sygnały w wątkach
+- Sygnały są mechanizmem komunikacji międzyprocesowej, ale w kontekście wątków, sygnały są dostarczane do całego procesu, a nie do konkretnego wątku. 
+- Kiedy jakiś sygnał nadchodzi, system wybiera **jeden** z wątków w obrębie tego procesu, który nie zablokował ten sygnał i dostarcza mu sygnał. Pozostałe wątki pracują bez zakłóceń. 
+- Jeśli *kilka* wątków są w stanie odebrać sygnał, system zupełnie **losowo** wybiera jeden z nich. 
+- Zwykła obsługa sygnałów poprzez handlery i wszystkie inne funkcje/mechanizmy z <signal.h> działają tak samo jak w przypadku procesów jednowątkowych. Jednak **NIE zaleca się** ich używać w programach wielowątkowych. Skutkuje to wieloma problemami, takimi jak:
+    + Trudności w określeniu, który wątek otrzyma sygnał.
+    + Potencjalne zakłócenia w działaniu wątków, jeśli sygnał zostanie dostarczony w nieodpowiednim momencie.
+    + Problemy z synchronizacją i współdzieleniem zasobów między wątkami podczas obsługi sygnałów.
+
+### Istotna właściwość sygnałów w kontekście wątków
+**Maskowanie sygnałów**. Każdy wątek ma swoją własną maskę sygnałów, która określa, które sygnały są zablokowane dla tego wątku. Można użyć `pthread_sigmask()` do ustawienia maski sygnałów dla konkretnego wątku. Nowo tworzone wątki dziedziczą maskę sygnałów od wątku, w którym zostały stworzone.
+
+### Funkcje do obsługi sygnałów w wątkach
+
+W środowisku wielowątkowym (pthreads):
+1.  **Handlery** (funkcje obsługi) są wspólne dla całego procesu.
+2.  **Maski sygnałów** są prywatne dla każdego wątku.
+3.  Zalecaną strategią jest zablokowanie sygnałów w `main` i użycie dedykowanego wątku z `sigwait`.
+
+#### 1. Zarządzanie Maską (Blokowanie)
+
+- `pthread_sigmask`
+Modyfikuje maskę sygnałów bieżącego wątku. Jest to odpowiednik `sigprocmask` dla wątków.
+
+```c
+#include <signal.h>
+int pthread_sigmask(int how, const sigset_t *set, sigset_t *oldset);
+```
+
+* **Wejście (Argumenty):**
+    * `how`: Operacja (`SIG_BLOCK` - dodaj, `SIG_UNBLOCK` - usuń, `SIG_SETMASK` - nadpisz).
+    * `set`: Wskaźnik do nowego zbioru sygnałów (lub `NULL`).
+    * `oldset`: Wskaźnik do zapisu starej maski (może być `NULL`).
+* **Wyjście (Zwraca):**
+    * `0`: Sukces.
+    * Kod błędu (np. `EINVAL`): Porażka.
+* **Opis:** Zmienia zbiór sygnałów blokowanych przez wątek. Nowe wątki dziedziczą maskę po wątku twórcy.
+
+---
+
+#### 2. Wysyłanie Sygnałów
+
+- `pthread_kill`
+Wysyła sygnał do konkretnego wątku (rówieśnika) w tym samym procesie.
+
+```c
+#include <signal.h>
+int pthread_kill(pthread_t thread, int sig);
+```
+
+* **Wejście (Argumenty):**
+    * `thread`: ID wątku (`pthread_t`), do którego wysyłamy sygnał.
+    * `sig`: Numer sygnału (np. `SIGUSR1`). Wartość `0` sprawdza istnienie wątku.
+* **Wyjście (Zwraca):**
+    * `0`: Sukces.
+    * Kod błędu (np. `ESRCH` - brak wątku, `EINVAL` - błędny sygnał).
+* **Opis:** Dostarcza sygnał do konkretnego wątku.
+    * **Uwaga:** Jeśli sygnał ma domyślną akcję "zabij" (np. `SIGTERM`) i nie jest obsłużony ani zablokowany, zginie **cały proces**, a nie tylko wątek docelowy.
+    * Sygnały wynikające z błędów sprzętowych (np. `SIGSEGV` - błąd pamięci) są zawsze dostarczane do wątku, który spowodował błąd.
+
+---
+
+#### 3. Odbieranie Synchroniczne (Wzorzec Recepcjonisty)
+
+Funkcje te służą do pobierania sygnałów z kolejki oczekujących (*pending*). Aby działały, sygnał **musi być zablokowany** w masce wątku.
+
+- `sigwait`
+Podstawowa funkcja czekająca na sygnał.
+
+```c
+#include <signal.h>
+int sigwait(const sigset_t *set, int *sig);
+```
+
+* **Wejście (Argumenty):**
+    * `set`: Zbiór sygnałów, na które czekamy.
+* **Wyjście (Argumenty przez wskaźnik):**
+    * `sig`: Zmienna, do której zostanie wpisany numer odebranego sygnału.
+* **Zwraca:**
+    * `0`: Sukces.
+    * Kod błędu (np. `EINVAL`).
+* **Opis:** Usypia wątek do momentu nadejścia sygnału. "Zjada" sygnał z kolejki (nie wywołuje handlera).
+
+- `sigwaitinfo`
+Rozszerzona wersja zwracająca szczegóły (np. kto wysłał sygnał).
+
+```c
+#include <signal.h>
+int sigwaitinfo(const sigset_t *set, siginfo_t *info);
+```
+
+* **Wejście (Argumenty):**
+    * `set`: Zbiór sygnałów.
+* **Wyjście (Argumenty przez wskaźnik):**
+    * `info`: Struktura `siginfo_t` wypełniana danymi (PID nadawcy, UID, itp.).
+* **Zwraca:**
+    * `>0`: Numer odebranego sygnału (Sukces).
+    * `-1`: Błąd (ustawia `errno`).
+
+- `sigtimedwait`
+Wersja z timeoutem (nie czeka w nieskończoność).
+
+```c
+#include <signal.h>
+int sigtimedwait(const sigset_t *set, siginfo_t *info, 
+                 const struct timespec *timeout);
+```
+
+* **Wejście (Argumenty):**
+    * `timeout`: Maksymalny czas oczekiwania.
+* **Zwraca:**
+    * Numer sygnału lub `-1` (z `errno=EAGAIN` po upływie czasu).
+
+---
+
+#### 4. Operacje Pomocnicze (Zbiory `sigset_t`)
+
+Funkcje makra do przygotowania maski bitowej przed użyciem powyższych funkcji.
+
+| Funkcja | Opis |
+| :--- | :--- |
+| `sigemptyset(sigset_t *set)` | Czyści zbiór (0 sygnałów). |
+| `sigfillset(sigset_t *set)` | Pełny zbiór (wszystkie sygnały). |
+| `sigaddset(sigset_t *set, int signum)` | Dodaje konkretny sygnał (np. `SIGINT`) do zbioru. |
+| `sigdelset(sigset_t *set, int signum)` | Usuwa konkretny sygnał ze zbioru. |
+| `sigismember(const sigset_t *set, int signum)` | Zwraca 1 (jest) lub 0 (nie ma). |
+
+
+### Przykład
+Załóżmy, że mamy proces z PID = 2137. Zawiera on wątek main i dwa wątki robocze (worker1 i worker2). 
+Tworzymy dedykowany wątek do obsługi sygnałów (signal_handler_thread), który będzie oczekiwał na sygnały `SIGUSR1` i `SIGUSR2` od procesu PID = 67. Po odebraniu sygnału, wątek wypisze informację o odebranym sygnale i PID nadawcy.
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <pthread.h>
+#include <signal.h>
+#include <unistd.h>
+#include <string.h>
+#include <errno.h>
+#define ERR(source) (perror(source), fprintf(stderr, "%s:%d\n", __FILE__, __LINE__), exit(EXIT_FAILURE))
+
+void* signal_handler_thread(void* arg)
+{
+    sigset_t signal_set;
+    sigemptyset(&signal_set);
+    sigaddset(&signal_set, SIGUSR1);
+    sigaddset(&signal_set, SIGUSR2);
+
+    while (1)
+    {
+        siginfo_t siginfo;
+        int sig = sigwaitinfo(&signal_set, &siginfo);
+        if (sig == -1)
+        {
+            if (errno == EINTR)
+                continue; 
+            ERR("sigwaitinfo failed");
+        }
+
+        printf("Received signal %d from PID %d\n", sig, siginfo.si_pid);
+    }
+    return NULL;
+}
+
+void* worker_thread(void* arg)
+{
+    while (1)
+    {
+        printf("Worker thread %ld is working...\n", (long)arg);
+        sleep(2);
+    }
+    return NULL;
+}
+
+int main()
+{
+    pthread_t signal_thread;
+    pthread_t worker1, worker2;
+
+    sigset_t signal_set;
+    sigemptyset(&signal_set);
+    sigaddset(&signal_set, SIGUSR1);
+    sigaddset(&signal_set, SIGUSR2);
+    if (pthread_sigmask(SIG_BLOCK, &signal_set, NULL))
+        ERR("pthread_sigmask failed");
+
+    if (pthread_create(&signal_thread, NULL, signal_handler_thread, NULL))
+        ERR("pthread_create for signal handler failed");
+
+    if (pthread_create(&worker1, NULL, worker_thread, (void*)1))
+        ERR("pthread_create for worker1 failed");
+    if (pthread_create(&worker2, NULL, worker_thread, (void*)2))
+        ERR("pthread_create for worker2 failed");
+
+    pthread_join(signal_thread, NULL);
+    pthread_join(worker1, NULL);
+    pthread_join(worker2, NULL);
+
+    return EXIT_SUCCESS;
+}
+```
+
+Gdybyśmy mieli dodatkowy wątek (worker3), który miałby funkcję sigwait wewnątrz siebie, to sygnały byłyby dostarczane losowo do wątku signal_handler_thread lub worker3, w zależności od tego, który z nich system wybierze w momencie nadejścia sygnału.
