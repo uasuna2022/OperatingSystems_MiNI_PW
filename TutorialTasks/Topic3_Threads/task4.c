@@ -8,6 +8,9 @@
 #include <stdbool.h>
 
 #define ERR(source) (perror(source), fprintf(stderr, "%s, line nr. %d\n", __FILE__, __LINE__), exit(EXIT_FAILURE))
+#define ELAPSED(start, end) ((end).tv_sec - (start).tv_sec) + (((end).tv_nsec - (start).tv_nsec) * 1.0e-9)
+
+typedef struct timespec timespec_t;
 
 typedef struct {
     bool* kicked;
@@ -32,33 +35,6 @@ void usage (int argc, char** argv)
     exit(EXIT_FAILURE);
 }
 
-void* student_life (void* arg)
-{
-    pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
-    pthread_setcanceltype(PTHREAD_CANCEL_DEFERRED, NULL);
-    cleanup_args* c_args;
-    year_counters* years = (year_counters*)arg;
-    c_args->data = years;
-    for (int year = 0; year < years->years_count - 1; year++)
-    {
-        pthread_mutex_lock(&years->mutexes[year]);
-        years->active_students_counters[year]++;
-        pthread_mutex_unlock(&years->mutexes[year]);
-
-        c_args->year_index = year;
-
-        pthread_cleanup_push(decrement_counter, c_args);
-        msleep(1000);
-        pthread_cleanup_pop(1);
-    }
-
-    pthread_mutex_lock(&years->mutexes[3]);
-    years->active_students_counters[3]++;
-    pthread_mutex_unlock(&years->mutexes[3]);
-
-    return NULL;
-}
-
 void decrement_counter(void* args)
 {
     cleanup_args* arguments = args;
@@ -76,6 +52,33 @@ void msleep(unsigned int milisec)
     req.tv_nsec = milisec * 1000000L;
     if (nanosleep(&req, &req))
         ERR("nanosleep");
+}
+
+void* student_life (void* arg)
+{
+    pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+    pthread_setcanceltype(PTHREAD_CANCEL_DEFERRED, NULL);
+    cleanup_args c_args;
+    year_counters* years = (year_counters*)arg;
+    c_args.data = years;
+    for (int year = 0; year < years->years_count - 1; year++)
+    {
+        pthread_mutex_lock(&years->mutexes[year]);
+        years->active_students_counters[year]++;
+        pthread_mutex_unlock(&years->mutexes[year]);
+
+        c_args.year_index = year;
+
+        pthread_cleanup_push(decrement_counter, (void*)&c_args);
+        msleep(1000);
+        pthread_cleanup_pop(1);
+    }
+
+    pthread_mutex_lock(&years->mutexes[3]);
+    years->active_students_counters[3]++;
+    pthread_mutex_unlock(&years->mutexes[3]);
+
+    return NULL;
 }
 
 void kick_student(students_array* students)
@@ -178,7 +181,41 @@ int main (int argc, char** argv)
         }
     }
 
+    timespec_t start, current;
+    if (clock_gettime(CLOCK_REALTIME, &start))
+        ERR("clock_gettime");
 
+    int currently_kicked = 0;
+    
+    do {
+        msleep(rand() % 201 + 100);
+        if (clock_gettime(CLOCK_REALTIME, &current))
+            ERR("clock_gettime");
+        if (currently_kicked < students->count)
+        {
+            kick_student(students);
+            currently_kicked++;
+        }
+    } while (ELAPSED(start, current) < 4.0);
+
+    int kicked_total = 0;
+
+    for (int i = 0; i < students->count; i++)
+    {   
+        void* retval;
+        if (pthread_join(students->student_ids[i], &retval))
+            ERR("Failed to join with a student thread!");
+        if (retval == PTHREAD_CANCELED)
+            kicked_total++;
+    }
+    printf(" First year: %d\n", years->active_students_counters[0]);
+    printf("Second year: %d\n", years->active_students_counters[1]);
+    printf(" Third year: %d\n", years->active_students_counters[2]);
+    printf("  Engineers: %d\n", years->active_students_counters[3]);
+    printf("Kicked students: %d out of %d\n", kicked_total, students->count);
+    free(students->kicked);
+    free(students->student_ids);
+    exit(EXIT_SUCCESS);
 
     return EXIT_SUCCESS;
 }
