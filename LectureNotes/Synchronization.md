@@ -111,3 +111,221 @@ int main()
     return EXIT_SUCCESS;
 }
 ```
+
+## Zmienne warunkowe
+
+**Zmienne warunkowe (CV)** są kolejnym mechanizmem synchronizacji. Używa się ich do blokowania wątków, aż spełniony zostanie określony warunek. Zmienne warunkowe są zawsze używane w połączeniu z mutexami, aby zapewnić bezpieczny dostęp do współdzielonych zasobów podczas oczekiwania na warunek. 
+
+Warto pamiętać, że zmienne warunkowe **NIE mają** własnego stanu. Są one po prostu mechanizmem do blokowania i odblokowywania wątków na podstawie zewnętrznych warunków.
+
+### Idea
+1. Wątek A chce poczekać na określony warunek (np. na wypełnienie bufora). Najpierw blokuje mutex, aby uzyskać dostęp do współdzielonego zasobu.
+2. Następnie sprawdza warunek. Jeśli warunek nie jest spełniony, wywołuje `wait()` na zmiennej warunkowej, co powoduje odblokowanie mutexu i zablokowanie wątku A.
+3. Inny wątek B, który zmienia stan współdzielonego zasobu (np. dodaje dane do bufora), blokuje mutex, modyfikuje zasób, a następnie wywołuje `signal()` lub `broadcast()` na zmiennej warunkowej, aby odblokować wątek A.
+4. Wątek A zostaje odblokowany, ponownie blokuje mutex i sprawdza warunek. Jeśli warunek jest teraz spełniony, kontynuuje swoje działanie.
+
+### Podstawowe operacje na zmiennych warunkowych
+- `pthread_cond_t cond` - deklaracja zmiennej warunkowej.
+- `pthread_cond_init(pthread_cond_t *cond, const pthread_condattr_t *attr)` - inicjalizacja zmiennej warunkowej.
+- `pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex)` - blokuje wątek na zmiennej warunkowej `cond` i odblokowuje mutex `mutex`. Wątek pozostaje zablokowany, aż inny wątek wywoła `signal()` lub `broadcast()` na tej zmiennej warunkowej. Po odblokowaniu wątek ponownie blokuje mutex przed kontynuacją.
+- `pthread_cond_signal(pthread_cond_t *cond)` - odblokowuje jeden z wątków (losowy) oczekujących na zmiennej warunkowej `cond` (jeśli taki istnieje, w przeciwnym razie nic się nie dzieje).
+- `pthread_cond_broadcast(pthread_cond_t *cond)` - odblokowuje wszystkie wątki oczekujące na zmiennej warunkowej `cond`.
+- `pthread_cond_destroy(pthread_cond_t *cond)` - niszczy zmienną warunkową, zwalniając zasoby z nią związane.
+- `pthread_condattr_t attr` - struktura atrybutów zmiennej warunkowej.
+- `pthread_condattr_init(pthread_condattr_t *attr)` - inicjalizacja atrybutów zmiennej warunkowej.
+- `pthread_condattr_setpshared(pthread_condattr_t *attr, int pshared)` - ustawia atrybut `pshared`, który określa, czy zmienna warunkowa może być współdzielona między procesami (jeśli `pshared` jest różne od 0) czy tylko między wątkami tego samego procesu (jeśli `pshared` jest równe 0).
+- `pthread_condattr_destroy(pthread_condattr_t *attr)` - niszczy atrybuty zmiennej warunkowej, zwalniając zasoby z nimi związane.
+
+### Przykład użycia zmiennych warunkowych
+```c
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <errno.h>
+
+#define ERR(source) (perror(source), fprintf(stderr, "%s, line nr. %d\n", __FILE__, __LINE__), exit(EXIT_FAILURE))
+#define MAX_BUFFER_SIZE 20
+
+typedef struct {
+    pthread_cond_t* cv;
+    pthread_mutex_t* mutex;
+    char* buffer;
+    int number_of_thread;
+} thread_str;
+
+void* read_thread(void* arg)
+{
+    thread_str* args = (thread_str*)arg;
+    printf("[%ld] I want to read a data from the buffer!\n", pthread_self());
+    pthread_mutex_lock(args->mutex);
+    while (args->buffer[0] == 45)
+    {
+        printf("[%ld] Waiting for data to be ready...\n", pthread_self());
+        pthread_cond_wait(args->cv, args->mutex);
+    }
+
+    printf("[%ld] Finally I got a data. Modifying it...\n", pthread_self());
+    args->buffer[args->number_of_thread * 2] = (char)(args->number_of_thread * 2 + 97);
+    sleep(1);
+    args->buffer[args->number_of_thread * 2 + 1] = (char)(args->number_of_thread * 2 + 98);
+    printf("[%ld]", pthread_self());
+    for (int i = 0; i < MAX_BUFFER_SIZE; i++)
+        printf("%c", args->buffer[i]);
+    printf("\n[%ld] Finished modifying data. Terminating...\n", pthread_self());
+    pthread_mutex_unlock(args->mutex);
+    return NULL;
+}
+
+void* prepare_thread (void* arg)
+{
+    thread_str* args = (thread_str*)arg;
+    printf("[%ld] I'm starting to prepare data...\n", pthread_self());
+    sleep(5);
+    pthread_mutex_lock(args->mutex);
+    args->buffer[0] = 'f';
+    for (int i = 0; i < MAX_BUFFER_SIZE; i++)
+        printf("%c", args->buffer[i]);
+    pthread_cond_broadcast(args->cv);
+    pthread_mutex_unlock(args->mutex);
+    printf("\n[%ld] Data is ready! Terminating...\n", pthread_self());
+    return NULL;
+}
+
+int main ()
+{
+    pthread_t threads[3];
+    pthread_mutex_t mutex;
+    pthread_cond_t cv;
+    char* buffer = (char*)malloc(MAX_BUFFER_SIZE * sizeof(char));
+    if (!buffer)
+        ERR("malloc");
+    for (int i = 0; i < MAX_BUFFER_SIZE; i++)
+        buffer[i] = 45;
+
+    if (pthread_mutex_init(&mutex, NULL))
+        ERR("pthread_mutex_init");
+    if (pthread_cond_init(&cv, NULL))
+        ERR("pthread_cond_init");
+    
+    thread_str args[3];
+    for (int i = 0; i < 3; i++)
+    {
+        args[i].cv = &cv;
+        args[i].mutex = &mutex;
+        args[i].buffer = buffer;
+        args[i].number_of_thread = i;
+        if (pthread_create(&threads[i], NULL, read_thread, (void*)&args[i]))
+            ERR("pthread_create");
+    }
+
+    pthread_t prepare_t;
+    thread_str prepare_str;
+    prepare_str.buffer = buffer;
+    prepare_str.cv = &cv;
+    prepare_str.mutex = &mutex;
+    prepare_str.number_of_thread = 4;
+    if (pthread_create(&prepare_t, NULL, prepare_thread, (void*)&prepare_str))
+        ERR("pthread_create");
+
+    pthread_join(prepare_t, NULL);
+    for (int i = 0; i < 3; i++)
+        pthread_join(threads[i], NULL);
+
+    if (pthread_mutex_destroy(&mutex))
+        ERR("pthread_mutex_destroy");
+    if (pthread_cond_destroy(&cv))
+        ERR("pthread_cond_destroy");
+    free(buffer);
+    return EXIT_SUCCESS;
+}
+
+```
+
+## Bariery
+
+Bariery są mechanizmem synchronizacji, który pozwala grupie wątków czekać, aż wszystkie dotrą do określonego punktu w kodzie, zanim będą mogły kontynuować swoje działanie. Są one szczególnie przydatne w sytuacjach, gdy wątki muszą zsynchronizować swoje działania na określonym etapie przetwarzania.
+
+### Idea
+1. Wątki wykonują swoje zadania niezależnie.
+2. Gdy wątek osiąga punkt synchronizacji (barierę), wywołuje `wait()` na barierze, zmniejszając licznik bariery.
+3. Wątek zostaje zablokowany, aż wszystkie wątki w grupie osiągną barierę (licznik osiągnie 0).
+4. Gdy wszystkie wątki dotrą do bariery, zostają odblokowane i mogą kontynuować swoje działanie, licznik bariery jest resetowany.
+
+### Podstawowe operacje na barierach
+- `pthread_barrier_t barrier` - deklaracja bariery.
+- `pthread_barrier_init(pthread_barrier_t *barrier, const pthread_barrierattr_t *attr, unsigned int count)` - inicjalizacja bariery z licznikiem `count`, który określa liczbę wątków, które muszą osiągnąć barierę, aby zostać odblokowane.
+- `pthread_barrier_wait(pthread_barrier_t *barrier)` - wątek wywołuje tę funkcję, aby osiągnąć barierę. Wątek zostaje zablokowany, aż wszystkie wątki w grupie osiągną barierę.
+- `pthread_barrier_destroy(pthread_barrier_t *barrier)` - niszczy barierę, zwalniając zasoby z nią związane.
+- `pthread_barrierattr_t attr` - struktura atrybutów bariery.
+- `pthread_barrierattr_init(pthread_barrierattr_t *attr)` - inicjalizacja atrybutów bariery.
+- `pthread_barrierattr_setpshared(pthread_barrierattr_t *attr, int pshared)` - ustawia atrybut `pshared`, który określa, czy bariera może być współdzielona między procesami (jeśli `pshared` jest różne od 0) czy tylko między wątkami tego samego procesu (jeśli `pshared` jest równe 0).
+- `pthread_barrierattr_destroy(pthread_barrierattr_t *attr)` - niszczy atrybuty bariery, zwalniając zasoby z nimi związane.
+
+### PTHREAD_BARRIER_SERIAL_THREAD
+
+Funkcja `pthread_barrier_wait()` zwraca 0 dla wszystkich wątków oprócz jednego. Ten jeden wybrany niedeterministycznie wątek (dotarł do barriery jako ostatni) otrzymuje wartość `PTHREAD_BARRIER_SERIAL_THREAD`. Może to być użyteczne, jeśli chcemy, aby jeden wątek wykonał dodatkowe zadania po osiągnięciu bariery, np. wykonał operacje zbiorcze.
+
+### Przykład użycia barier
+```c
+#define _GNU_SOURCE
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <errno.h>
+
+
+#define ERR(source) (perror(source), fprintf(stderr, "%s, line nr. %d\n", __FILE__, __LINE__), exit(EXIT_FAILURE))
+#define THREADS_COUNT 5
+
+int partial_sums[THREADS_COUNT];
+int total_sum = 0;
+pthread_barrier_t barrier;
+
+void* thread_job (void* arg)
+{
+    int number = (int)arg;
+    for (int c = 1; c <= 3; c++)
+    {
+        unsigned int seed = time(NULL) ^ pthread_self();
+        int random_sleep = rand_r(&seed) % 11;
+        printf("[%ld] I'm sleeping for %d seconds...\n", pthread_self(), random_sleep);
+        sleep(random_sleep);
+        int random_value = rand_r(&seed) % 101;
+        partial_sums[number] += random_value;
+        printf("[%ld] I got number %d\n", pthread_self(), random_value);
+        printf("[%ld] I'm at the barrier now. My partial sum is %d\n", pthread_self(), partial_sums[number]);
+        if (pthread_barrier_wait(&barrier) == PTHREAD_BARRIER_SERIAL_THREAD)
+        {
+            total_sum = 0;
+            for (int i = 0; i < THREADS_COUNT; i++)
+                total_sum += partial_sums[i];
+            
+            printf("[%ld] I've been chosen as last: total_sum = %d\n", pthread_self(), total_sum);
+        }
+    }
+    return NULL;
+}
+
+int main()
+{
+    if (pthread_barrier_init(&barrier, NULL, THREADS_COUNT))
+        ERR("pthread_barrier_init");
+    
+    pthread_t threads[THREADS_COUNT];
+    for (int i = 0; i < THREADS_COUNT; i++)
+    {
+        if (pthread_create(&threads[i], NULL, thread_job, (void*)i))
+            ERR("pthread_create");
+    }
+
+    for (int i = 0; i < THREADS_COUNT; i++)
+        pthread_join(threads[i], NULL);
+    
+    return EXIT_SUCCESS;
+}
+```
+
+
+
