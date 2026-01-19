@@ -17,7 +17,17 @@ typedef struct {
     pthread_mutex_t* do_work_mutex;
     int* do_work;
     int* N;
+    pthread_cond_t* cvs;
 } PorterArgs;
+
+typedef struct {
+    Region* region;
+    pthread_mutex_t* do_work_mutex;
+    pthread_mutex_t* region_mutex;
+    int* do_work;
+    int region_idx;
+    pthread_cond_t* cv;
+} WorkerArgs;
 
 void* signal_handler_thread (void* arg)
 {
@@ -63,8 +73,66 @@ void* porter_work (void* arg)
 
         pthread_mutex_lock(&(args->regions_mutexes[random_region]));
         args->regions[random_region].unused += 5;
+        pthread_cond_broadcast(&(args->cvs[random_region]));
         pthread_mutex_unlock(&(args->regions_mutexes[random_region]));
     }
+}
+
+void* worker_work (void* arg)
+{
+    WorkerArgs* args = (WorkerArgs*)arg;
+    int worker_number = args->region_idx;
+    while (1)
+    {
+        pthread_mutex_lock(args->do_work_mutex);
+        if (*(args->do_work) == 0)
+        {
+            printf("[%ld] Worker is leaving...\n", pthread_self());
+            pthread_mutex_unlock(args->do_work_mutex);
+            return NULL;
+        }
+        pthread_mutex_unlock(args->do_work_mutex);
+        
+        pthread_mutex_lock(args->region_mutex);
+        while (args->region->unused == 0)
+        {
+            printf("[%ld] SERVVS %d: EXPECTO SALEM\n", pthread_self(), worker_number);
+            pthread_mutex_lock(args->do_work_mutex);
+            if (*(args->do_work) == 0) 
+            {
+                pthread_mutex_unlock(args->do_work_mutex);
+                pthread_mutex_unlock(args->region_mutex);
+                printf("[%ld] Worker is leaving...\n", pthread_self());
+                return NULL;
+            }
+            pthread_mutex_unlock(args->do_work_mutex);
+            struct timespec ts = get_cond_wait_time(100);
+            int ret = pthread_cond_timedwait(args->cv, args->region_mutex, &ts);
+            if (ret == ETIMEDOUT)
+                continue;
+            if (ret != 0)
+                ERR("pthread_cond_timedwait");
+        }
+
+        args->region->unused -= 1;
+        args->region->sprinkled += 1;
+
+        pthread_mutex_unlock(args->region_mutex);
+        msleep(15); // working
+
+        pthread_mutex_lock(args->region_mutex);
+        printf("[%ld] SERVVS %d: ADIPISCOR SALEM %d ADHVC IVGERVM\n", 
+            pthread_self(), worker_number, args->region->sprinkled);
+        if (args->region->sprinkled == 50)
+        {
+            printf("[%ld] SERVVS %d: LABOR MEVS CONFICIO\n", pthread_self(), worker_number);
+            pthread_mutex_unlock(args->region_mutex);
+            return NULL;
+        }
+        pthread_mutex_unlock(args->region_mutex);
+    }
+
+    return NULL;
 }
 
 int main(int argc, char* argv[])
@@ -119,11 +187,19 @@ int main(int argc, char* argv[])
     PorterArgs* porter_args = (PorterArgs*)malloc(sizeof(PorterArgs));
     if (!porter_args)
         ERR("porter_args");
+
+    pthread_cond_t* cvs = (pthread_cond_t*)malloc(sizeof(pthread_cond_t) * N);
+    if (!cvs)
+        ERR("malloc");
+    for (int i = 0; i < N; i++)
+        if (pthread_cond_init(&cvs[i], NULL))
+            ERR("pthread_cond_init");
     
     porter_args->do_work = &do_work;
     porter_args->do_work_mutex = &do_work_mutex;
     porter_args->N = &N;
     porter_args->regions = regions;
+    porter_args->cvs = cvs;
 
     pthread_mutex_t* regions_mutexes = (pthread_mutex_t*)malloc(sizeof(pthread_mutex_t) * N);
     if (!regions_mutexes)
@@ -141,27 +217,45 @@ int main(int argc, char* argv[])
             ERR("pthread_create");
     }
     
+    pthread_t* workers = (pthread_t*)malloc(sizeof(pthread_t) * N);
+    if (!workers)
+        ERR("malloc");
+    WorkerArgs* worker_args = (WorkerArgs*)malloc(sizeof(WorkerArgs) * N);
+    if (!worker_args)
+        ERR("malloc");
     
-    while (1)
+    for (int i = 0; i < N; i++)
     {
-        printf("[Main] Working...\n");
-        pthread_mutex_lock(&do_work_mutex);
-        if (do_work == 0)
-        {
-            pthread_mutex_unlock(&do_work_mutex);
-            if (pthread_join(signal_thread, NULL))
-                ERR("pthread_join");
-            for (int i = 0; i < Q; i++)
-            {
-                if (pthread_join(porters[i], NULL))
-                    ERR("pthread_join");
-            }
-            printf("[Main] do_work = 0 -> terminating...\n");
-            break;
-        }
-        pthread_mutex_unlock(&do_work_mutex);
-        msleep(500);
+        worker_args[i].cv = &cvs[i];
+        worker_args[i].do_work = &do_work;
+        worker_args[i].do_work_mutex = &do_work_mutex;
+        worker_args[i].region = &regions[i];
+        worker_args[i].region_idx = i;
+        worker_args[i].region_mutex = &regions_mutexes[i];
+        if (pthread_create(&workers[i], NULL, worker_work, (void*)&worker_args[i]))
+            ERR("pthread_create");
     }
+    
+    for (int i = 0; i < N; i++)
+    {
+        if (pthread_join(workers[i], NULL))
+            ERR("pthread_join");
+    }
+
+    pthread_mutex_lock(&do_work_mutex);
+    if (do_work == 1)
+    {
+        printf("[Main thread] SCIPION: VENI, VIDI, VICI, CONSPERSI\n");
+        kill(0, SIGINT);
+    }
+    pthread_mutex_unlock(&do_work_mutex);
+    for (int i = 0; i < Q; i++)
+    {
+        if (pthread_join(porters[i], NULL))
+            ERR("pthread_join");
+    }
+    if (pthread_join(signal_thread, NULL))
+        ERR("pthread_join");
 
     for (int i = 0; i < N; i++)
     {
@@ -172,10 +266,18 @@ int main(int argc, char* argv[])
     for (int i = 0; i < N; i++)
         if (pthread_mutex_destroy(&regions_mutexes[i]))
             ERR("pthread_mutex_destroy");
+    for (int i = 0; i < N; i++)
+    {
+        if (pthread_cond_destroy(&cvs[i]))
+            ERR("pthread_cond_destroy");
+    }
+    free(cvs);
     free(regions_mutexes);
     free(porter_args);
     free(porters);
     free(args);
     free(regions);
+    free(workers);
+    free(worker_args);
     return EXIT_SUCCESS;
 }
