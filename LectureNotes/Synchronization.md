@@ -327,5 +327,103 @@ int main()
 }
 ```
 
+## Read-Write Locks (Blokady do odczytu i zapisu)
+
+Read-Write Locks (RW Locks) są mechanizmem synchronizacji, który pozwala wielu wątkom na jednoczesny odczyt współdzielonego zasobu, ale tylko jednemu wątkowi na zapis. Dzięki temu RW Locks zwiększają wydajność w sytuacjach, gdy operacje odczytu są częstsze niż operacje zapisu.
+
+### Idea
+1. Wątki, które chcą odczytać zasób, uzyskują blokadę do odczytu (read lock). Wiele wątków może jednocześnie posiadać blokadę do odczytu.
+2. Wątki, które chcą zapisać zasób, uzyskują blokadę do zapisu (write lock). Tylko jeden wątek może posiadać blokadę do zapisu w danym momencie, a żaden inny wątek nie może posiadać blokady do odczytu ani do zapisu w tym czasie.
+3. Gdy wątek z blokadą do zapisu zakończy swoje działanie, zwalnia blokadę, umożliwiając innym wątkom uzyskanie blokad do odczytu lub zapisu.
+
+### Podstawowe operacje na Read-Write Locks
+- `pthread_rwlock_t rwlock` - deklaracja Read-Write Lock.
+- `pthread_rwlock_init(pthread_rwlock_t *rwlock, const pthread_rwlockattr_t *attr)` - inicjalizacja Read-Write Lock.
+- `pthread_rwlock_rdlock(pthread_rwlock_t *rwlock)` - uzyskuje blokadę do odczytu. Jeśli inny wątek posiada blokadę do zapisu, wątek zostaje zablokowany, aż blokada do zapisu zostanie zwolniona.
+- `pthread_rwlock_wrlock(pthread_rwlock_t *rwlock)` - uzyskuje blokadę do zapisu. Jeśli inny wątek posiada blokadę do odczytu lub zapisu, wątek zostaje zablokowany, aż wszystkie blokady zostaną zwolnione.
+- `pthread_rwlock_unlock(pthread_rwlock_t *rwlock)` - zwalnia blokadę (do odczytu lub zapisu) posiadaną przez wątek.
+- `pthread_rwlock_destroy(pthread_rwlock_t *rwlock)` - niszczy Read-Write Lock, zwalniając zasoby z nim związane.
+- `pthread_rwlockattr_t attr` - struktura atrybutów Read-Write Lock.
+- `pthread_rwlockattr_init(pthread_rwlockattr_t *attr)` - inicjalizacja atrybutów Read-Write Lock.
+- `pthread_rwlockattr_setpshared(pthread_rwlockattr_t *attr, int pshared)` - ustawia atrybut `pshared`, który określa, czy Read-Write Lock może być współdzielony między procesami (jeśli `pshared` jest różne od 0) czy tylko między wątkami tego samego procesu (jeśli `pshared` jest równe 0).
+- `pthread_rwlockattr_destroy(pthread_rwlockattr_t *attr)` - niszczy atrybuty Read-Write Lock, zwalniając zasoby z nimi związane.
+
+### Przykład użycia Read-Write Locks
+```c
+#define _GNU_SOURCE
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <errno.h>
+#include <stdint.h>
+#define ERR(source) (perror(source), fprintf(stderr, "%s, line nr. %d\n", __FILE__, __LINE__), exit(EXIT_FAILURE))
+
+#define MAX_READERS 5
+
+int shared_data = 0;
+pthread_rwlock_t rwlock = PTHREAD_RWLOCK_INITIALIZER;
+
+void* reader(void* arg)
+{
+    int reader_id = (int)(intptr_t)arg;
+    for (int i = 0; i < 10; i++)
+    {
+        pthread_rwlock_rdlock(&rwlock);
+        printf("Reader %d: read shared_data = %d\n", reader_id, shared_data);
+        sleep(2);
+        pthread_rwlock_unlock(&rwlock);
+        usleep(1000);
+    }
+
+    return NULL;
+}
+
+void* writer(void* arg)
+{
+    for (int i = 0; i < 5; i++)
+    {
+        pthread_rwlock_wrlock(&rwlock);
+        shared_data += 1;
+        printf("Writer: updated shared_data to %d\n", shared_data);
+        sleep(3);
+        pthread_rwlock_unlock(&rwlock);
+        usleep(1000);
+    }
+
+    return NULL;
+}
+
+int main()
+{
+    pthread_t readers[MAX_READERS];
+    pthread_t writer_thread;
+
+    for (int i = 0; i < MAX_READERS; i++)
+    {
+        if (pthread_create(&readers[i], NULL, reader, (void*)(intptr_t)i))
+            ERR("pthread_create");
+    }
+
+    if (pthread_create(&writer_thread, NULL, writer, NULL))
+        ERR("pthread_create");
+
+    for (int i = 0; i < MAX_READERS; i++)
+        pthread_join(readers[i], NULL);
+
+    pthread_join(writer_thread, NULL);
+
+    pthread_rwlock_destroy(&rwlock);
+    return EXIT_SUCCESS;
+}
+```
+
+## Kiedy używać którego mechanizmu?
+1. **Mutexy** - gdy mamy jakąś krótką sekcję krytyczną, do której dostęp ma mieć tylko jeden wątek na raz.
+2. **Semafory** - gdy chcemy ograniczyć liczbę wątków mających jednoczesny dostęp do zasobu lub gdy potrzebujemy prostego sygnału między wątkami. Jeśli potrzebujemy sygnału, to używamy semafora z początkową wartością 0. Wątek oczekujący na sygnał wywołuje `wait()`, a wątek wysyłający sygnał wywołuje `post()`.
+3. **Zmienne warunkowe** - gdy wątki muszą czekać na określony warunek, który może być spełniony przez inny wątek. Używamy ich zawsze w połączeniu z mutexami.
+4. **Bariery** - gdy grupa wątków musi zsynchronizować swoje działania na określonym etapie przetwarzania.
+5. **Read-Write Locks** - gdy mamy zasób, do którego dostęp ma być możliwy dla wielu wątków jednocześnie w trybie odczytu, ale tylko jeden wątek ma mieć dostęp w trybie zapisu. Stosujemy, kiedy rzadko dochodzi do zapisu, a często do odczytu.
+
 
 
