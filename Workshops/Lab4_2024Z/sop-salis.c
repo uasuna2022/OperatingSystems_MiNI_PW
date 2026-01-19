@@ -18,6 +18,7 @@ typedef struct {
     int* do_work;
     int* N;
     pthread_cond_t* cvs;
+    sem_t* sem;
 } PorterArgs;
 
 typedef struct {
@@ -66,6 +67,12 @@ void* porter_work (void* arg)
             return NULL;
         }
         pthread_mutex_unlock(args->do_work_mutex);
+
+        if (sem_wait(args->sem))
+            ERR("sem_wait");
+        msleep(5);
+        if (sem_post(args->sem))
+            ERR("sem_post");
 
         int random_region = rand_r(&seed) % *(args->N);
         msleep(5 + random_region);
@@ -211,6 +218,11 @@ int main(int argc, char* argv[])
     
     porter_args->regions_mutexes = regions_mutexes;
 
+    sem_t sem;
+    if (sem_init(&sem, 0, 3))
+        ERR("sem_init");
+    porter_args->sem = &sem;
+
     for (int i = 0; i < Q; i++)
     {
         if (pthread_create(&porters[i], NULL, porter_work, (void*)porter_args))
@@ -271,6 +283,8 @@ int main(int argc, char* argv[])
         if (pthread_cond_destroy(&cvs[i]))
             ERR("pthread_cond_destroy");
     }
+    if (sem_destroy(&sem))
+        ERR("sem_destroy"); 
     free(cvs);
     free(regions_mutexes);
     free(porter_args);
