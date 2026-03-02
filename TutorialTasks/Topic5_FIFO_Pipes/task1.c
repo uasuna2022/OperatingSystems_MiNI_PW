@@ -19,14 +19,22 @@ void usage (int argc, char** argv)
 void read_from_fifo (int fifo)
 {
     ssize_t bytes_read;
-    char c;
+    char buffer[PIPE_BUF];
     do 
     {
-        bytes_read = read(fifo, &c, 1);
+        bytes_read = read(fifo, buffer, PIPE_BUF);
         if (bytes_read == -1)
             ERR("read");
-        if (bytes_read > 0 && isalnum(c))
-            printf("%c", c);
+        if (bytes_read > 0)
+        {
+            pid_t sender_pid = *((pid_t*)buffer);
+            printf("Received from PID %d: ", sender_pid);
+            for (ssize_t i = sizeof(pid_t); i < bytes_read; i++)
+            {
+                if (isalpha(buffer[i]))
+                    printf("%c", buffer[i]);
+            }
+        }
     } while (bytes_read > 0);
     printf("\n");
 }
@@ -47,6 +55,9 @@ int main (int argc, char** argv)
     read_from_fifo(fifo);
     if (close(fifo) == -1)
         ERR("close");
+
+    if (unlink(argv[1]) == -1)
+        ERR("unlink");
     
     return EXIT_SUCCESS;
 }
