@@ -98,15 +98,15 @@ int main(int argc, char* argv[])
     FILE* franci_file = fopen("franci.txt", "r");
     if (!franci_file)
     {
-        printf("Franks haven't arrived on the battlefield!");
-        ERR("fopen");
+        printf("Franks haven't arrived on the battlefield!\n");
+        exit(EXIT_FAILURE);
     }
 
     FILE* saraceni_file = fopen("saraceni.txt", "r");
     if (!saraceni_file)
     {
-        printf("Saracens haven't arrived on the battlefield!");
-        ERR("fopen");
+        printf("Saracens haven't arrived on the battlefield!\n");
+        exit(EXIT_FAILURE);
     }
 
     Knight* francis, *saracenis;
@@ -114,7 +114,17 @@ int main(int argc, char* argv[])
     int f_count = parse_file(&francis, franci_file);
     int s_count = parse_file(&saracenis, saraceni_file);
 
+    for (int i = 0; i < f_count; i++)
+    {
+        printf("I'm Frankish knight %s. I will serve my king with my %d HP and %d attack.\n", 
+            francis[i].name, francis[i].hp, francis[i].attack);
+    }
 
+    for (int i = 0; i < s_count; i++)
+    {
+        printf("I'm Spanish knight %s. I will serve my king with my %d HP and %d attack.\n",
+            saracenis[i].name, saracenis[i].hp, saracenis[i].attack);
+    }
 
     free(francis);
     free(saracenis);
