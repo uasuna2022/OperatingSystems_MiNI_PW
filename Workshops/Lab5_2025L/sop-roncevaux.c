@@ -111,6 +111,27 @@ void close_pipes(int number, int* write_fds, int* read_fds, int is_franci, int f
     }
 }
 
+void attack_enemy (Knight* me, int is_franci, int* write_fds, int franci_count, int saraceni_count)
+{
+    int N = (is_franci == 1) ? saraceni_count : franci_count;
+    int enemy_to_attack = rand() % N;
+    if (is_franci == 1) enemy_to_attack += franci_count;
+
+    uint8_t random_damage = rand() % me->attack + 1;
+    if (write(write_fds[enemy_to_attack], &random_damage, 1) == -1)
+        ERR("write");
+    
+    if (random_damage == 0)
+        printf("[%d] %s attacks his enemy, however he deflected (0 damage to %d)\n", getpid(),
+         me->name, enemy_to_attack);
+    if (random_damage > 0 && random_damage <= 5)
+        printf("[%d] %s goes to strike, he hit right and well (%d damage to %d)\n", getpid(), 
+        me->name, random_damage, enemy_to_attack);
+    if (random_damage >= 6)
+        printf("[%d] %s strikes powerful blow, the shield he breaks and inflicts a big wound (%d damage to %d)\n",
+             getpid(), me->name, random_damage, enemy_to_attack);
+}
+
 int main(int argc, char* argv[])
 {
     srand(time(NULL));
@@ -164,12 +185,45 @@ int main(int argc, char* argv[])
             if (i < f_count) close_pipes(i, write_fds, read_fds, 1, f_count, s_count);
             else close_pipes(i, write_fds, read_fds, 0, f_count, s_count);
 
-            if (i < f_count)
-                printf("[%d] I'm french! ", getpid());
-            else
-                printf("[%d] I'm sarrasin! ", getpid());
+            srand(time(NULL) + getpid());
 
-            printf("Opened descriptors: %d\n", count_descriptors());
+            int flags = fcntl(read_fds[i], F_GETFL, 0);
+            if (flags == -1)
+                ERR("fcntl");
+            
+            if (fcntl(read_fds[i], F_SETFL, flags | O_NONBLOCK) == -1)
+                ERR("fcntl");
+
+            Knight* me;
+            if (i < f_count)
+                me = &francis[i];
+            else me = &saracenis[i - f_count];
+
+            
+
+            while (1)
+            {
+                int read_index = read_fds[i];
+                
+                uint8_t damage_received;
+                ssize_t bytes_read;
+
+                while ((bytes_read = read(read_index, &damage_received, sizeof(uint8_t))) > 0)
+                {
+                    me->hp -= damage_received;
+                    printf("[%d] %s received %d damage, remaining hp: %d\n", getpid(), 
+                        me->name, damage_received, me->hp);
+                }
+                if (bytes_read == -1 && errno != EAGAIN)
+                    ERR("read");
+                
+                if (me->hp <= 0)
+                    break;
+                
+                attack_enemy(me, (i < f_count) ? 1 : 0, write_fds, f_count, s_count);
+                int random_sleep = rand() % 9 + 1;
+                msleep(random_sleep * 100);
+            }
 
             exit(EXIT_SUCCESS);
         }
