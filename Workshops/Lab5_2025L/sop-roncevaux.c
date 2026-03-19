@@ -90,10 +90,31 @@ int parse_file(Knight** knights, FILE* f)
     return count;
 }
 
+void close_pipes(int number, int* write_fds, int* read_fds, int is_franci, int franci_count, int saraceni_count)
+{
+    for (int i = 0; i < franci_count + saraceni_count; i++)
+    {
+        if (i == number)
+            continue;
+        else close(read_fds[i]);
+    }
+
+    if (is_franci == 1)
+    {
+        for (int i = 0; i < franci_count; i++)
+            close(write_fds[i]);
+    }
+    else 
+    {
+        for (int i = 0; i < saraceni_count; i++)
+            close(write_fds[i + franci_count]);
+    }
+}
+
 int main(int argc, char* argv[])
 {
     srand(time(NULL));
-    // printf("Opened descriptors: %d\n", count_descriptors());
+    printf("Opened descriptors: %d\n", count_descriptors());
 
     FILE* franci_file = fopen("franci.txt", "r");
     if (!franci_file)
@@ -114,19 +135,57 @@ int main(int argc, char* argv[])
     int f_count = parse_file(&francis, franci_file);
     int s_count = parse_file(&saracenis, saraceni_file);
 
-    for (int i = 0; i < f_count; i++)
+    fclose(franci_file);
+    fclose(saraceni_file);
+
+    int* read_fds = (int*) malloc (sizeof(int) * (f_count + s_count));
+    if (!read_fds)
+        ERR("malloc");
+    int* write_fds = (int*) malloc (sizeof(int) * (f_count + s_count));
+    if (!write_fds)
+        ERR("malloc");
+
+    for (int i = 0; i < s_count + f_count; i++)
     {
-        printf("I'm Frankish knight %s. I will serve my king with my %d HP and %d attack.\n", 
-            francis[i].name, francis[i].hp, francis[i].attack);
+        int fd[2];
+        if (pipe(fd))
+            ERR("pipe");
+        read_fds[i] = fd[0];
+        write_fds[i] = fd[1];
     }
 
-    for (int i = 0; i < s_count; i++)
+    for (int i = 0; i < f_count + s_count; i++)
     {
-        printf("I'm Spanish knight %s. I will serve my king with my %d HP and %d attack.\n",
-            saracenis[i].name, saracenis[i].hp, saracenis[i].attack);
+        pid_t pid = fork();
+        if (pid < 0)
+            ERR("fork");
+        if (pid == 0)
+        {
+            if (i < f_count) close_pipes(i, write_fds, read_fds, 1, f_count, s_count);
+            else close_pipes(i, write_fds, read_fds, 0, f_count, s_count);
+
+            if (i < f_count)
+                printf("[%d] I'm french! ", getpid());
+            else
+                printf("[%d] I'm sarrasin! ", getpid());
+
+            printf("Opened descriptors: %d\n", count_descriptors());
+
+            exit(EXIT_SUCCESS);
+        }
     }
+
+    for (int i = 0; i < f_count + s_count; i++)
+    {
+        close(read_fds[i]);
+        close(write_fds[i]);
+    }
+
+    while (wait(NULL) > 0) {}
 
     free(francis);
     free(saracenis);
+    free(read_fds);
+    free(write_fds);
     return EXIT_SUCCESS;
 }
