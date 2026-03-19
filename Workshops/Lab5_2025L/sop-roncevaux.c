@@ -111,15 +111,30 @@ void close_pipes(int number, int* write_fds, int* read_fds, int is_franci, int f
     }
 }
 
-void attack_enemy (Knight* me, int is_franci, int* write_fds, int franci_count, int saraceni_count)
+void attack_enemy (Knight* me, int is_franci, int* write_fds, int franci_count, int saraceni_count,
+    int* alive_enemies, int* alive_enemies_number)
 {
-    int N = (is_franci == 1) ? saraceni_count : franci_count;
-    int enemy_to_attack = rand() % N;
-    if (is_franci == 1) enemy_to_attack += franci_count;
+    if (*alive_enemies_number == 0)
+        return;
+    
+    int random_enemy_index = rand() % *alive_enemies_number;
+    int enemy_to_attack = alive_enemies[random_enemy_index];
 
     uint8_t random_damage = rand() % me->attack + 1;
     if (write(write_fds[enemy_to_attack], &random_damage, 1) == -1)
-        ERR("write");
+    {
+        if (errno == EPIPE)
+        {
+            printf("[%d] %s tries to attack, but his enemy is already dead\n", getpid(), me->name);
+            alive_enemies[random_enemy_index] = alive_enemies[*alive_enemies_number - 1];
+            (*alive_enemies_number)--;
+            attack_enemy(me, is_franci, write_fds, franci_count, saraceni_count, 
+                alive_enemies, alive_enemies_number);
+            return;
+        }
+        else ERR("write");
+    }
+        
     
     if (random_damage == 0)
         printf("[%d] %s attacks his enemy, however he deflected (0 damage to %d)\n", getpid(),
@@ -136,6 +151,8 @@ int main(int argc, char* argv[])
 {
     srand(time(NULL));
     printf("Opened descriptors: %d\n", count_descriptors());
+    if (set_handler(SIG_IGN, SIGPIPE) == -1)
+        ERR("set_handler");
 
     FILE* franci_file = fopen("franci.txt", "r");
     if (!franci_file)
@@ -199,6 +216,12 @@ int main(int argc, char* argv[])
                 me = &francis[i];
             else me = &saracenis[i - f_count];
 
+            int alive_count = (i < f_count) ? s_count : f_count;
+            int* alive_enemies = (int*) malloc (sizeof(int) * alive_count);
+            if (!alive_enemies)
+                ERR("malloc");
+            for (int j = 0; j < alive_count; j++)
+                alive_enemies[j] = (i < f_count) ? (j + f_count) : j;
             
 
             while (1)
@@ -212,19 +235,42 @@ int main(int argc, char* argv[])
                 {
                     me->hp -= damage_received;
                     printf("[%d] %s received %d damage, remaining hp: %d\n", getpid(), 
-                        me->name, damage_received, me->hp);
+                        me->name, damage_received, me->hp >= 0 ? me->hp : 0);
+                    if (me->hp <= 0)
+                       break;
                 }
                 if (bytes_read == -1 && errno != EAGAIN)
                     ERR("read");
                 
                 if (me->hp <= 0)
+                {
+                    printf("[%d] %s dies\n", getpid(), me->name);
                     break;
+                }
                 
-                attack_enemy(me, (i < f_count) ? 1 : 0, write_fds, f_count, s_count);
+                attack_enemy(me, (i < f_count) ? 1 : 0, write_fds, f_count, s_count, 
+                    alive_enemies, &alive_count);
+                if (alive_count == 0)
+                {
+                    printf("[%d] no more enemies, I win! %s are victorious!\n", getpid(), 
+                        (i < f_count) ? "Franks" : "Saracens");
+                    break;
+                }
                 int random_sleep = rand() % 9 + 1;
                 msleep(random_sleep * 100);
             }
 
+            close(read_fds[i]);
+            for (int k = (i < f_count) ? f_count : 0; k < ((i < f_count) ? f_count + s_count : f_count); k++)
+            {
+                close(write_fds[k]);
+            }
+
+            free(francis);
+            free(saracenis);
+            free(read_fds);
+            free(write_fds);
+            free(alive_enemies);
             exit(EXIT_SUCCESS);
         }
     }
