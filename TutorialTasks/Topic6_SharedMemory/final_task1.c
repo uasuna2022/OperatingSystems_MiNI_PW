@@ -94,6 +94,8 @@ int main (int argc, char** argv)
             ERR("fork");
         if (child_pids[i] == 0)
         {
+            srand((unsigned int)(time(NULL) ^ getpid()));
+
             int fd_file = open(argv[1], O_RDONLY);
             if (fd_file == -1)
                 ERR("open");
@@ -123,8 +125,21 @@ int main (int argc, char** argv)
             if (close(fd_file))
                 ERR("close");
 
-            if (pthread_mutex_lock(mutex_addr))
-                ERR("pthread_mutex_lock");  
+            int lock_result = pthread_mutex_lock(mutex_addr);
+            if (lock_result == EOWNERDEAD)
+            {
+                if (pthread_mutex_consistent(mutex_addr))
+                    ERR("pthread_mutex_consistent");
+            }
+            else if (lock_result)
+            {
+                errno = lock_result;
+                ERR("pthread_mutex_lock");
+            }
+
+            if (rand() % 100 < 3)
+                abort();
+
             for (int j = 0; j < TOTAL_ASCII_CHARS; j++)
                 signs_count_addr[j] += child_signs_count[j];
             if (pthread_mutex_unlock(mutex_addr))
@@ -139,9 +154,18 @@ int main (int argc, char** argv)
     }
 
 
-    while (wait(NULL) > 0) {}  
-    
-    print_signs_count(signs_count_addr);
+    int failed = 0;
+    int status = 0;
+    while (wait(&status) > 0)
+    {
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+            failed = 1;
+    }
+
+    if (failed)
+        printf("Calculations failed: at least one child process died.\n");
+    else
+        print_signs_count(signs_count_addr);
 
     if (pthread_mutex_destroy(mutex_addr))
         ERR("pthread_mutex_destroy");
