@@ -87,7 +87,8 @@ int main(int argc, char** argv)
     if ((shm_fd = shm_open(SHOP_FILENAME, O_CREAT | O_TRUNC | O_RDWR, 0600)) == -1)
         ERR("shm_open");
     
-    int max_size = sizeof(int) * MAX_SHELVES + sizeof(pthread_mutex_t) * MAX_SHELVES;
+    int max_size = sizeof(int) * MAX_SHELVES + sizeof(pthread_mutex_t) * MAX_SHELVES
+        + sizeof(int) + sizeof(pthread_mutex_t);
     if (ftruncate(shm_fd, max_size))
         ERR("ftruncate");
     
@@ -97,6 +98,9 @@ int main(int argc, char** argv)
 
     int* start_arr = (int*)addr;
     pthread_mutex_t* mutexes_start = (pthread_mutex_t*)(start_arr + N);
+    int* var = (int*)(mutexes_start + N);
+    *var = 0;
+    pthread_mutex_t* var_mutex = (pthread_mutex_t*)(var + 1);
 
     pthread_mutexattr_t mutex_attributes;
     if (pthread_mutexattr_init(&mutex_attributes))
@@ -113,11 +117,16 @@ int main(int argc, char** argv)
         if (pthread_mutex_init(mutexes_start + i, &mutex_attributes))
             ERR("pthread_mutex_init");
     }
+
+    if (pthread_mutex_init(var_mutex, &mutex_attributes))
+        ERR("pthread_mutex_init");
+
     if (pthread_mutexattr_destroy(&mutex_attributes))
         ERR("pthread_mutexattr_destroy");
 
     shuffle(start_arr, N);
     print_array(start_arr, N);
+
 
     pid_t* worker_pids = (pid_t*)malloc(sizeof(pid_t) * M);
     if (!worker_pids) 
@@ -134,8 +143,25 @@ int main(int argc, char** argv)
             srand(time(NULL) ^ getpid());
             int random_idx_less, random_idx_more;
 
-            for (int j = 0; j < 10; j++)
+            while (1)
             {
+                if (pthread_mutex_lock(var_mutex))
+                    ERR("pthread_mutex_lock");
+                if (*var)
+                {
+                    if (pthread_mutex_unlock(var_mutex))
+                        ERR("ptrhead_mutex_unlock");
+                    
+                    free(worker_pids);
+                    if (munmap(addr, max_size))
+                        ERR("munmap");
+                    close(shm_fd);
+                    
+                    exit(EXIT_SUCCESS);
+                }
+                if (pthread_mutex_unlock(var_mutex))
+                        ERR("ptrhead_mutex_unlock");
+                
                 while (1)
                 {
                     random_idx_less = rand() % N;
@@ -172,6 +198,59 @@ int main(int argc, char** argv)
             exit(EXIT_SUCCESS);
         }
     }
+
+    pid_t manager = fork();
+    if (manager == -1)
+        ERR("fork");
+    if (manager == 0)
+    {
+        printf("[%d] Manager reports for a night shift\n", getpid());
+        while (1)
+        {
+            ms_sleep(500);
+            print_array(start_arr, N);
+            if(msync(addr, max_size, MS_SYNC))
+                ERR("msync");
+
+            for (int i = 0; i < N; i++)
+            {
+                if (pthread_mutex_lock(mutexes_start + i))
+                    ERR("pthread_mutex_lock");
+            }
+            int sorted = 1;
+            for (int i = 0; i < N - 1; i++)
+            {
+                if (start_arr[i] > start_arr[i + 1])
+                {
+                    sorted = 0;
+                    break;
+                }
+            }
+            for (int i = 0; i < N; i++)
+            {
+                if (pthread_mutex_unlock(mutexes_start + i))
+                    ERR("pthread_mutex_unlock");
+            }
+            if (sorted)
+            {
+                printf("[%d] The shop shelves are sorted\n", getpid());
+                if (pthread_mutex_lock(var_mutex))
+                    ERR("pthread_mutex_lock");
+                *var = 1;
+                if (pthread_mutex_unlock(var_mutex))
+                    ERR("pthread_mutex_unlock");
+                break;
+            }
+        }
+
+        free(worker_pids);
+        if (munmap(addr, max_size))
+            ERR("munmap");
+        close(shm_fd);
+
+        exit(EXIT_SUCCESS);
+    }
+    
 
     while (wait(NULL) > 0) {}
 
