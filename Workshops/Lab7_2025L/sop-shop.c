@@ -88,7 +88,7 @@ int main(int argc, char** argv)
         ERR("shm_open");
     
     int max_size = sizeof(int) * MAX_SHELVES + sizeof(pthread_mutex_t) * MAX_SHELVES
-        + sizeof(int) + sizeof(pthread_mutex_t);
+        + sizeof(int) + sizeof(pthread_mutex_t) + sizeof(int);
     if (ftruncate(shm_fd, max_size))
         ERR("ftruncate");
     
@@ -101,6 +101,8 @@ int main(int argc, char** argv)
     int* var = (int*)(mutexes_start + N);
     *var = 0;
     pthread_mutex_t* var_mutex = (pthread_mutex_t*)(var + 1);
+    int* alive_workers = (int*)(var_mutex + 1);
+    *alive_workers = 2 * M;
 
     pthread_mutexattr_t mutex_attributes;
     if (pthread_mutexattr_init(&mutex_attributes))
@@ -166,7 +168,7 @@ int main(int argc, char** argv)
                 {
                     random_idx_less = rand() % N;
                     random_idx_more = rand() % N;
-                    printf("[%d] idx1 - %d idx2 - %d\n", getpid(), random_idx_less, random_idx_more);
+                    // printf("[%d] idx1 - %d idx2 - %d\n", getpid(), random_idx_less, random_idx_more);
                     if (random_idx_less != random_idx_more)
                         break;
                 }
@@ -174,10 +176,42 @@ int main(int argc, char** argv)
                 if (random_idx_less > random_idx_more)
                     swap(&random_idx_less, &random_idx_more);
 
-                if (pthread_mutex_lock(mutexes_start + random_idx_less))
+                int rt = pthread_mutex_lock(mutexes_start + random_idx_less);
+                if (rt == EOWNERDEAD)
+                {
+                    printf("[%d] Found dead body in aisle [%d]\n", getpid(), 
+                        random_idx_less);
+                    if (pthread_mutex_consistent(mutexes_start + random_idx_less))
+                        ERR("pthread_mutex_consistent");
+                    if (pthread_mutex_lock(var_mutex))
+                        ERR("pthread_mutex_lock");
+                    (*alive_workers)--;
+                    if (pthread_mutex_unlock(var_mutex))
+                        ERR("pthread_mutex_unlock");
+                }
+                else if (rt)
                     ERR("pthread_mutex_lock");
-                if (pthread_mutex_lock(mutexes_start + random_idx_more))
+                rt = pthread_mutex_lock(mutexes_start + random_idx_more);
+                if (rt == EOWNERDEAD)
+                {
+                    printf("[%d] Found dead body in aisle [%d]\n", getpid(), 
+                        random_idx_more);
+                    if (pthread_mutex_consistent(mutexes_start + random_idx_more))
+                        ERR("pthread_mutex_consistent");
+                    if (pthread_mutex_lock(var_mutex))
+                        ERR("pthread_mutex_lock");
+                    (*alive_workers)--;
+                    if (pthread_mutex_unlock(var_mutex))
+                        ERR("pthread_mutex_unlock");
+                }
+                else if (rt)
                     ERR("pthread_mutex_lock");
+
+                if (rand() % 100 == 0)
+                {
+                    printf("[%d] Trips over pallet and dies\n", getpid());
+                    abort();
+                }
                 
                 if (start_arr[random_idx_less] > start_arr[random_idx_more])
                     swap(&start_arr[random_idx_less], &start_arr[random_idx_more]);
@@ -207,14 +241,25 @@ int main(int argc, char** argv)
         printf("[%d] Manager reports for a night shift\n", getpid());
         while (1)
         {
-            ms_sleep(500);
             print_array(start_arr, N);
             if(msync(addr, max_size, MS_SYNC))
                 ERR("msync");
 
             for (int i = 0; i < N; i++)
             {
-                if (pthread_mutex_lock(mutexes_start + i))
+                int rt = pthread_mutex_lock(mutexes_start + i);
+                if (rt == EOWNERDEAD)
+                {
+                    printf("[%d] Found dead body in aisle [%d]\n", getpid(), i);
+                    if (pthread_mutex_consistent(mutexes_start + i))
+                        ERR("pthread_mutex_consistent");
+                    if (pthread_mutex_lock(var_mutex))
+                        ERR("pthread_mutex_lock");
+                    (*alive_workers)--;
+                    if (pthread_mutex_unlock(var_mutex))
+                        ERR("pthread_mutex_unlock");
+                }
+                else if (rt)
                     ERR("pthread_mutex_lock");
             }
             int sorted = 1;
@@ -241,6 +286,20 @@ int main(int argc, char** argv)
                     ERR("pthread_mutex_unlock");
                 break;
             }
+            if (pthread_mutex_lock(var_mutex))
+                ERR("pthread_mutex_lock");
+            printf("[%d] Workers alive: %d\n", getpid(), (*alive_workers) / 2);
+            if ((*alive_workers) / 2 == 0)
+            {
+                printf("[%d] All workers are dead, I hate my job\n", getpid());
+                if (pthread_mutex_unlock(var_mutex))
+                    ERR("pthread_mutex_unlock");
+                break;
+            }
+            if (pthread_mutex_unlock(var_mutex))
+                ERR("pthread_mutex_unlock");
+
+            ms_sleep(500);
         }
 
         free(worker_pids);
