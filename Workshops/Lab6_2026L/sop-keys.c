@@ -124,6 +124,26 @@ int main(int argc, char** argv)
     delete_semaphores(M);
     create_semaphores(M, KEYBOARD_CAP);
 
+    ssize_t shm_size = sizeof(pthread_barrier_t);
+    void* addr = mmap(NULL, shm_size, PROT_READ | PROT_WRITE, 
+        MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (addr == MAP_FAILED)
+        ERR("mmap");
+    
+    pthread_barrierattr_t barrier_attr;
+    if (pthread_barrierattr_init(&barrier_attr))
+        ERR("pthread_barrierattr_init");
+    if (pthread_barrierattr_setpshared(&barrier_attr, PTHREAD_PROCESS_SHARED))
+        ERR("pthread_barrierattr_setpshared");
+    
+    pthread_barrier_t* barrier = (pthread_barrier_t*)addr;
+    if (pthread_barrier_init(barrier, &barrier_attr, N + 1))
+        ERR("pthread_barrier_init");
+    
+    if (pthread_barrierattr_destroy(&barrier_attr))
+        ERR("pthread_barrierattr_destroy");
+
+
     pid_t* children = malloc(N * sizeof(pid_t));
     if (children == NULL)
         ERR("malloc");
@@ -140,6 +160,10 @@ int main(int argc, char** argv)
             if (!semaphores)
                 ERR("malloc");
             
+            if (pthread_barrier_wait(barrier) == PTHREAD_BARRIER_SERIAL_THREAD)
+                printf("[%d] All students are ready, starting the cleaning process.\n",
+                     getpid());
+
             open_semaphores(M, semaphores);
 
             for (int j = 0; j < 10; j++)
@@ -156,16 +180,24 @@ int main(int argc, char** argv)
             close_semaphores(semaphores, M);
             free(semaphores);
             free(children);
+            if (munmap(addr, shm_size))
+                ERR("munmap");
             
             exit(EXIT_SUCCESS);
         }
     }
+
+    ms_sleep(500);
+    if (pthread_barrier_wait(barrier) == PTHREAD_BARRIER_SERIAL_THREAD)
+        printf("[%d] All students have started cleaning.\n", getpid());
     
     while (wait(NULL) > 0) {}   
 
     printf("All students have finished cleaning.\n");
     delete_semaphores(M);
     free(children);
+    if (pthread_barrier_destroy(barrier))
+        ERR("pthread_barrier_destroy");
     
     exit(EXIT_SUCCESS);
 }
