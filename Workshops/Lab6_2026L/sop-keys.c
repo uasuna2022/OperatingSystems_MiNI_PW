@@ -124,7 +124,8 @@ int main(int argc, char** argv)
     delete_semaphores(M);
     create_semaphores(M, KEYBOARD_CAP);
 
-    ssize_t mmap_size = sizeof(pthread_barrier_t) + sizeof(pthread_mutex_t) * M * K;
+    ssize_t mmap_size = sizeof(pthread_barrier_t) + sizeof(pthread_mutex_t) * M * K +
+        sizeof(int) + sizeof(pthread_mutex_t);
     void* addr = mmap(NULL, mmap_size, PROT_READ | PROT_WRITE, 
         MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     if (addr == MAP_FAILED)
@@ -156,9 +157,16 @@ int main(int argc, char** argv)
         if (pthread_mutex_init(&mutexes[i], &mutex_attr))
             ERR("pthread_mutex_init");
     }
+    
+
+    int* var = (int*)(mutexes + M * K);
+    *var = 0;
+    pthread_mutex_t* var_mutex = (pthread_mutex_t*)(var + 1);
+    if (pthread_mutex_init(var_mutex, &mutex_attr))
+        ERR("pthread_mutex_init");
+
     if (pthread_mutexattr_destroy(&mutex_attr))
         ERR("pthread_mutexattr_destroy");
-
 
     pid_t* children = malloc(N * sizeof(pid_t));
     if (children == NULL)
@@ -194,8 +202,18 @@ int main(int argc, char** argv)
             if (keys == MAP_FAILED)
                 ERR("mmap");
 
-            for (int j = 0; j < 10; j++)
+            while (1)
             {
+                if (pthread_mutex_lock(var_mutex))
+                    ERR("pthread_mutex_lock");
+                if (*var > 0)
+                {
+                    if (pthread_mutex_unlock(var_mutex))
+                        ERR("pthread_mutex_unlock");
+                    break;
+                }
+                if (pthread_mutex_unlock(var_mutex))
+                    ERR("pthread_mutex_unlock");
                 int random_keyboard = rand() % M;
                 if (sem_wait(semaphores[random_keyboard]))
                     ERR("sem_wait");
@@ -206,8 +224,31 @@ int main(int argc, char** argv)
                     getpid(), random_keyboard, random_key);
                 ms_sleep(300);
 
-                if (pthread_mutex_lock(&mutexes[random_keyboard * K + random_key]))
+                
+                int rt = pthread_mutex_lock(&mutexes[random_keyboard * K + random_key]);
+                if (rt == EOWNERDEAD)
+                {
+                    printf("Student [%d]: found a dead student while trying to clean keyboard %d, key %d\n",
+                        getpid(), random_keyboard, random_key);
+                    
+                    if (pthread_mutex_lock(var_mutex))
+                        ERR("pthread_mutex_lock");
+                    (*var)++;
+                    if (pthread_mutex_unlock(var_mutex))
+                        ERR("pthread_mutex_unlock");
+
+                }
+                if (rt != EOWNERDEAD && rt != 0)
                     ERR("pthread_mutex_lock");
+
+                if (rand() % 100 == 0)
+                {
+                    printf("Student [%d]: I'm tired!\n", getpid());
+                    if (sem_post(semaphores[random_keyboard]))
+                        ERR("sem_post");
+                    abort();
+                }
+
                 keys[random_keyboard * K + random_key] /= 3.0;
                 if (pthread_mutex_unlock(&mutexes[random_keyboard * K + random_key]))
                     ERR("pthread_mutex_unlock");
