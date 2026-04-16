@@ -124,8 +124,8 @@ int main(int argc, char** argv)
     delete_semaphores(M);
     create_semaphores(M, KEYBOARD_CAP);
 
-    ssize_t shm_size = sizeof(pthread_barrier_t);
-    void* addr = mmap(NULL, shm_size, PROT_READ | PROT_WRITE, 
+    ssize_t mmap_size = sizeof(pthread_barrier_t) + sizeof(pthread_mutex_t) * M * K;
+    void* addr = mmap(NULL, mmap_size, PROT_READ | PROT_WRITE, 
         MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     if (addr == MAP_FAILED)
         ERR("mmap");
@@ -142,6 +142,22 @@ int main(int argc, char** argv)
     
     if (pthread_barrierattr_destroy(&barrier_attr))
         ERR("pthread_barrierattr_destroy");
+    
+    pthread_mutex_t* mutexes = (pthread_mutex_t*)(barrier + 1);
+    pthread_mutexattr_t mutex_attr;
+    if (pthread_mutexattr_init(&mutex_attr))
+        ERR("pthread_mutexattr_init");
+    if (pthread_mutexattr_setpshared(&mutex_attr, PTHREAD_PROCESS_SHARED))
+        ERR("pthread_mutexattr_setpshared");
+    if (pthread_mutexattr_setrobust(&mutex_attr, PTHREAD_MUTEX_ROBUST))
+        ERR("pthread_mutexattr_setrobust");
+    for (int i = 0; i < M * K; i++)
+    {
+        if (pthread_mutex_init(&mutexes[i], &mutex_attr))
+            ERR("pthread_mutex_init");
+    }
+    if (pthread_mutexattr_destroy(&mutex_attr))
+        ERR("pthread_mutexattr_destroy");
 
 
     pid_t* children = malloc(N * sizeof(pid_t));
@@ -159,20 +175,43 @@ int main(int argc, char** argv)
             sem_t** semaphores = (sem_t**)malloc(sizeof(sem_t*) * M);
             if (!semaphores)
                 ERR("malloc");
+
+            open_semaphores(M, semaphores);
             
             if (pthread_barrier_wait(barrier) == PTHREAD_BARRIER_SERIAL_THREAD)
                 printf("[%d] All students are ready, starting the cleaning process.\n",
                      getpid());
 
-            open_semaphores(M, semaphores);
+            // stage 3
+            int child_shm_fd = shm_open(SHARED_MEM_NAME, O_RDWR, 0600);
+            if (child_shm_fd == -1)
+                ERR("shm_open");
+
+            ssize_t child_shm_size = sizeof(double) * M * K;
+            
+            double* keys = (double*)mmap(NULL, child_shm_size, PROT_READ | PROT_WRITE, 
+                MAP_SHARED, child_shm_fd, 0);
+            if (keys == MAP_FAILED)
+                ERR("mmap");
 
             for (int j = 0; j < 10; j++)
             {
                 int random_keyboard = rand() % M;
                 if (sem_wait(semaphores[random_keyboard]))
                     ERR("sem_wait");
-                printf("Student [%d]: cleaning the keyboard %d\n", getpid(), random_keyboard);
+
+                int random_key = rand() % K;
+                
+                printf("Student [%d]: cleaning the keyboard %d, key %d\n", 
+                    getpid(), random_keyboard, random_key);
                 ms_sleep(300);
+
+                if (pthread_mutex_lock(&mutexes[random_keyboard * K + random_key]))
+                    ERR("pthread_mutex_lock");
+                keys[random_keyboard * K + random_key] /= 3.0;
+                if (pthread_mutex_unlock(&mutexes[random_keyboard * K + random_key]))
+                    ERR("pthread_mutex_unlock");
+
                 if (sem_post(semaphores[random_keyboard]))
                     ERR("sem_post");
             }
@@ -180,12 +219,32 @@ int main(int argc, char** argv)
             close_semaphores(semaphores, M);
             free(semaphores);
             free(children);
-            if (munmap(addr, shm_size))
+            if (munmap(addr, mmap_size))
+                ERR("munmap");
+            close(child_shm_fd);
+            if (munmap(keys, child_shm_size))
                 ERR("munmap");
             
             exit(EXIT_SUCCESS);
         }
     }
+
+    // stage 3
+    int fd_shm = shm_open(SHARED_MEM_NAME, O_CREAT | O_RDWR, 0600);
+    if (fd_shm == -1)
+        ERR("shm_open");
+
+    int shm_size = sizeof(double) * M * K;
+    if (ftruncate(fd_shm, shm_size))
+        ERR("ftruncate");
+    
+    void* shm_addr = mmap(NULL, shm_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd_shm, 0);
+    if (shm_addr == MAP_FAILED)
+        ERR("mmap");
+    
+    double* keys = (double*)shm_addr;
+    for (int i = 0; i < M * K; i++)
+        keys[i] = 1.0;
 
     ms_sleep(500);
     if (pthread_barrier_wait(barrier) == PTHREAD_BARRIER_SERIAL_THREAD)
@@ -194,10 +253,26 @@ int main(int argc, char** argv)
     while (wait(NULL) > 0) {}   
 
     printf("All students have finished cleaning.\n");
+    print_keyboards_state(keys, M, K);
+
+    for (int i = 0; i < M * K; i++)
+    {
+        if (pthread_mutex_destroy(&mutexes[i]))
+            ERR("pthread_mutex_destroy");
+    } 
     delete_semaphores(M);
     free(children);
     if (pthread_barrier_destroy(barrier))
         ERR("pthread_barrier_destroy");
-    
+
+    if (munmap(addr, mmap_size))
+        ERR("munmap");
+    if (munmap(shm_addr, shm_size))
+        ERR("munmap");
+    if (shm_unlink(SHARED_MEM_NAME))
+        ERR("shm_unlink");
+
+    close(fd_shm);  
+
     exit(EXIT_SUCCESS);
 }
