@@ -172,16 +172,55 @@ int main(int argc, char **argv)
                         }
                     }
 
-                    // Po przetworzeniu odebranych bajtów sprawdzamy, czy mamy już komplet informacji
+                    // === NOWA LOGIKA Z ETAPU 3: ŁĄCZENIE W PARY ===
                     if (clients[c_fd].name_complete && clients[c_fd].partner_complete)
                     {
-                        // Wymóg etapu 2: wypisujemy kto z kim chce wziąć ślub
-                        printf("%s chce pobrać się z %s\n", clients[c_fd].name, clients[c_fd].partner);
+                        int partner_fd = -1;
+
+                        // Szukamy w całej tablicy, czy ktoś już czeka na tego klienta na krzyż
+                        for (int k = 0; k < 1024; k++)
+                        {
+                            // Musi być aktywny, mieć komplet danych i to nie możemy być my sami
+                            if (k != c_fd && clients[k].active && clients[k].name_complete && clients[k].partner_complete)
+                            {
+                                // Sprawdzamy na krzyż: (Moje imię == Twoj wybranek) ORAZ (Mój wybranek == Twoje imię)
+                                if (strcmp(clients[c_fd].name, clients[k].partner) == 0 &&
+                                    strcmp(clients[c_fd].partner, clients[k].name) == 0)
+                                {
+                                    partner_fd = k; // Mamy go!
+                                    break;
+                                }
+                            }
+                        }
+
+                        // Jeśli udało się kogoś znaleźć
+                        if (partner_fd != -1)
+                        {
+                            // 1. Wypisujemy logi na serwerze
+                            printf("%s i %s pobrali się!\n", clients[c_fd].name, clients[c_fd].partner);
+
+                            // 2. Formujemy wiadomość (polecenie mówi, że może być ta sama dla obu)
+                            char msg[256];
+                            int msg_len = snprintf(msg, sizeof(msg), "Gratulacje, %s i %s!\n", clients[c_fd].name, clients[c_fd].partner);
+
+                            // Wyrzucamy wiadomość w strumień korzystając z pancernego bulk_write z l7-common
+                            bulk_write(c_fd, msg, msg_len);
+                            bulk_write(partner_fd, msg, msg_len);
+
+                            // 3. Rozłączamy naszego klienta (sprzątamy po nim)
+                            epoll_ctl(epoll_fd, EPOLL_CTL_DEL, c_fd, NULL);
+                            close(c_fd);
+                            clients[c_fd].active = 0;
+
+                            // 4. Rozłączamy jego świeżo poślubionego partnera
+                            epoll_ctl(epoll_fd, EPOLL_CTL_DEL, partner_fd, NULL);
+                            close(partner_fd);
+                            clients[partner_fd].active = 0;
+                        }
                         
-                        // Zgodnie z poleceniem na tym etapie: od razu po tym rozłączamy klienta
-                        epoll_ctl(epoll_fd, EPOLL_CTL_DEL, c_fd, NULL);
-                        close(c_fd);
-                        clients[c_fd].active = 0;
+                        // Zauważ, że nie ma tu klauzuli 'else'. 
+                        // Jeśli (partner_fd == -1), nie robimy nic. 
+                        // Klient czeka w stanie aktywnym, aż jego wybranek sam się połączy i go odnajdzie.
                     }
                 }
                 else if (bytes_read == 0) // Tradycyjny EOF (gdyby EPOLLRDHUP nie zadziałał)
