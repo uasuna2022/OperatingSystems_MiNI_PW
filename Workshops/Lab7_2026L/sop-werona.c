@@ -22,6 +22,20 @@ void usage(char *name)
 #define UNIX_SK_NAME "Laurenty"
 #define MAX_MSG_LEN 63
 
+struct ClientInfo {
+    int active;
+    // Bufory na imiona (MAX_MSG_LEN + 1 na znak '\0')
+    char name[MAX_MSG_LEN + 1];
+    int name_len;        // Ile liter imienia już wczytano
+    int name_complete;   // Czy znaleźliśmy już '\n' dla imienia?
+
+    char partner[MAX_MSG_LEN + 1];
+    int partner_len;
+    int partner_complete; // Czy znaleźliśmy już '\n' dla partnera?
+};
+
+struct ClientInfo clients[1024];
+
 int main(int argc, char **argv)
 {
     if (argc != 2)
@@ -38,6 +52,9 @@ int main(int argc, char **argv)
     }
 
     sethandler(SIG_IGN, SIGPIPE);
+
+
+    memset(clients, 0, sizeof(clients));
 
     // 1. Tworzymy gniazdo UNIX. 
     // Ta funkcja sama usuwa stary plik (unlink), robi socket, bind i listen.
@@ -79,19 +96,104 @@ int main(int argc, char **argv)
         // Przeglądamy wszystkie powiadomienia, które przyniósł epoll
         for (int i = 0; i < ready_fds; i++)
         {
-            // Jeśli powiadomienie dotyczy naszego gniazda "recepcji"...
+            // === SCENARIUSZ 1: NOWE POŁĄCZENIE ===
             if (events[i].data.fd == server_fd)
             {
-                // ...to znaczy, że ktoś nowy dzwoni. Odbieramy (znowu funkcja z l7-common)
                 int client_fd = add_new_client(server_fd);
                 if (client_fd >= 0)
                 {
-                    // Wymóg z etapu 1: Wypisać komunikat z numerem deskryptora
-                    printf("Kolejna młoda osoba (%d) potrzebuje mojej pomocy!\n", client_fd);
-                    
-                    // Wymóg z etapu 1: Od razu zamknąć połączenie!
-                    // Na razie nie dodajemy go do epolla, bo w 1 etapie nie gadamy z klientem.
-                    close(client_fd);
+                    // Resetujemy stan tego konkretnego klienta w naszej tablicy
+                    clients[client_fd].active = 1;
+                    clients[client_fd].name_len = 0;
+                    clients[client_fd].name_complete = 0;
+                    clients[client_fd].partner_len = 0;
+                    clients[client_fd].partner_complete = 0;
+                    memset(clients[client_fd].name, 0, MAX_MSG_LEN + 1);
+                    memset(clients[client_fd].partner, 0, MAX_MSG_LEN + 1);
+
+                    // Rejestrujemy klienta w epoll (dodajemy EPOLLRDHUP żeby łapać rozłączenia)
+                    ev.events = EPOLLIN | EPOLLRDHUP;
+                    ev.data.fd = client_fd;
+                    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &ev) == -1)
+                        ERR("epoll_ctl ADD client");
+                }
+            }
+            // === SCENARIUSZ 2: ZNANY KLIENT COŚ ZROBIŁ ===
+            else 
+            {
+                int c_fd = events[i].data.fd;
+
+                // Sprawdzamy, czy klient się przypadkiem nie rozłączył (EOF lub błąd)
+                if (events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR))
+                {
+                    // Wymóg z etapu 2: Zależnie od tego, czy podał imię wypisujemy różne rzeczy
+                    if (clients[c_fd].name_complete) {
+                        printf("Utraciłem kontakt z %s\n", clients[c_fd].name);
+                    } else {
+                        printf("Utraciłem kontakt z ??\n");
+                    }
+
+                    // Sprzątanie po kliencie
+                    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, c_fd, NULL);
+                    close(c_fd);
+                    clients[c_fd].active = 0;
+                    continue; // Ważne: przerywamy obieg pętli dla tego FD, bo już go zamknęliśmy
+                }
+
+                // Odczyt danych z gniazda
+                char buffer[256];
+                int bytes_read = read(c_fd, buffer, sizeof(buffer));
+
+                if (bytes_read > 0)
+                {
+                    // Zamiast traktować cały bufor jako jedną wiadomość, 
+                    // przetwarzamy go literka po literce, szukając '\n'
+                    for (int j = 0; j < bytes_read; j++)
+                    {
+                        char c = buffer[j];
+
+                        // Krok A: Czytamy imię klienta
+                        if (!clients[c_fd].name_complete) 
+                        {
+                            if (c == '\n') {
+                                clients[c_fd].name_complete = 1; // Mamy całe imię!
+                            } else if (clients[c_fd].name_len < MAX_MSG_LEN) {
+                                clients[c_fd].name[clients[c_fd].name_len++] = c;
+                            }
+                        }
+                        // Krok B: Imię już mamy, więc czytamy imię partnera
+                        else if (!clients[c_fd].partner_complete) 
+                        {
+                            if (c == '\n') {
+                                clients[c_fd].partner_complete = 1; // Mamy partnera!
+                            } else if (clients[c_fd].partner_len < MAX_MSG_LEN) {
+                                clients[c_fd].partner[clients[c_fd].partner_len++] = c;
+                            }
+                        }
+                    }
+
+                    // Po przetworzeniu odebranych bajtów sprawdzamy, czy mamy już komplet informacji
+                    if (clients[c_fd].name_complete && clients[c_fd].partner_complete)
+                    {
+                        // Wymóg etapu 2: wypisujemy kto z kim chce wziąć ślub
+                        printf("%s chce pobrać się z %s\n", clients[c_fd].name, clients[c_fd].partner);
+                        
+                        // Zgodnie z poleceniem na tym etapie: od razu po tym rozłączamy klienta
+                        epoll_ctl(epoll_fd, EPOLL_CTL_DEL, c_fd, NULL);
+                        close(c_fd);
+                        clients[c_fd].active = 0;
+                    }
+                }
+                else if (bytes_read == 0) // Tradycyjny EOF (gdyby EPOLLRDHUP nie zadziałał)
+                {
+                    if (clients[c_fd].name_complete) {
+                        printf("Utraciłem kontakt z %s\n", clients[c_fd].name);
+                    } else {
+                        printf("Utraciłem kontakt z ??\n");
+                    }
+                    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, c_fd, NULL);
+                    close(c_fd);
+                    clients[c_fd].active = 0;
                 }
             }
         }
